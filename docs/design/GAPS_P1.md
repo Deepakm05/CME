@@ -76,7 +76,7 @@ From the [gap analysis](GAP_ANALYSIS.md) (2026-10-05, commit `c23e3cf`). See als
 
 ### C3. Static asset headers
 
-- [ ] **Do:** hashed file names are already immutable. In Pages `_headers`, add `Cache-Control: immutable` for `/assets/*` and `no-cache` for `index.html`.
+- [x] **Do:** hashed file names are already immutable. In Pages `_headers`, add `Cache-Control: immutable` for `/assets/*` and `no-cache` for `index.html`.
 
 ## Security
 
@@ -84,7 +84,7 @@ The site is public and read-only, with no accounts, so the risks are abuse, inje
 
 ### X1. Security headers
 
-- [ ] **Do:** in Pages `_headers`:
+- [x] **Do:** in Pages `_headers`:
   - A CSP of `default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'` (React inline styles).
   - `frame-ancestors 'none'`.
   - HSTS.
@@ -106,7 +106,7 @@ The site is public and read-only, with no accounts, so the risks are abuse, inje
 
 ### X6. Dependency hygiene
 
-- [ ] **Do:** run `npm audit` in CI, and set up weekly Dependabot or Renovate.
+- [x] **Do:** run `npm audit` in CI, and set up weekly Dependabot or Renovate.
 
 ## Observability
 
@@ -144,11 +144,11 @@ The site is public and read-only, with no accounts, so the risks are abuse, inje
 
 ### CD2. Staging environment
 
-- [ ] **Do:** two Wrangler environments (`staging`, `production`), each with its own DO namespace. Pages preview deployments per PR, pointed at staging.
+- [x] **Do:** two Wrangler environments (`staging`, `production`), each with its own DO namespace. Pages preview deployments per PR, pointed at staging.
 
 ### CD3. Rollback plan
 
-- [ ] **Do:** `wrangler rollback` for the Worker and "rollback to deployment" for Pages. Schema migrations are forward-only and additive, so a rollback never needs a down-migration.
+- [x] **Do:** `wrangler rollback` for the Worker and "rollback to deployment" for Pages. Schema migrations are forward-only and additive, so a rollback never needs a down-migration.
 
 ## Frontend
 

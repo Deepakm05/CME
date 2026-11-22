@@ -156,11 +156,19 @@ The site is public and read-only, with no accounts, so the risks are abuse, inje
 
 ## 4. Progress
 
-P0 status, updated 2026-10-05:
+P0 status, updated 2026-11-22:
 
 | Gap | Status |
 |---|---|
-| D1 schema matches the contract | ✅ `schema.sql` rewritten; loads in SQLite. The row round-trip test comes with the Worker |
+| D1 schema matches the contract | ✅ `schema.sql` rewritten; loads in SQLite. Row round-trip test in `apps/worker/test/db.test.ts` |
+| D3 hello message | 🔜 `HelloMessage` and `PROTOCOL_VERSION` in `packages/shared`; the server sends it (in progress) |
+| R1, R2, X4 | ✅ built and tested in the Worker: `feeds/poll.ts` (timeouts, backoff), `feeds/goes.ts` and `feeds/rtsw.ts` (upstream checks), `obs/log.ts` (redaction) |
+| S1, R3 | ✅ `state/commit.ts` and `state/deltaRing.ts` (in-memory delta ring, `seq` persisted with the commit). R3 restart rules are not yet tested end to end |
+| O1 freshness measured | ✅ backend `LagTracker` in `obs/metrics.ts`; `HealthResponse` gained optional `status`, `seq`, `sockets`, `alarmLagS` and `lag` |
+| T1 contract suite | ✅ also runs against the Worker in CI (`.github/workflows/contract-worker.yml`, with a fixture feed server) |
+| C3, X1 headers | ✅ `apps/web/public/_headers` |
+| X6 dependency hygiene | ✅ Dependabot (`.github/dependabot.yml`) and `npm audit` in CI |
+| CD2 staging, CD3 rollback | ✅ staging env and PR previews; rollback documented in `apps/worker/README.md` |
 | D2 / F3 runtime validation | ✅ `packages/shared/src/schema.ts`. The client validates messages, `/state` and the cache, and resyncs on bad data (tested). Every mock message in every scenario is checked by a test |
 | T1 contract test suite | ✅ `packages/contract-tests`: 10 tests, run against the in-process mock in CI, or any server via `CONTRACT_BASE_URL` |
 | CD1 CI with lint and tests | ✅ `.github/workflows/ci.yml`: typecheck, ESLint, all tests (97), build, `npm audit`. No formatter yet (adopting one would rewrite every file; do it in its own commit) |

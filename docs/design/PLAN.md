@@ -17,10 +17,11 @@ Contract + mock (done) ──► Frontend: Phase 2 → 3 (UI parts) → 4 (UI pa
 
 ## Phase 0: Setup
 
-- [ ] Monorepo: `apps/worker` next to `apps/web` (scaffolded) and the existing `apps/mock`, `packages/{shared,physics}`
+- [x] Monorepo: `apps/worker` next to `apps/web` (scaffolded) and the existing `apps/mock`, `packages/{shared,physics}`
 - [ ] Cloudflare account (free, no card) → `wrangler` login; Pages project linked to GitHub
 - [ ] Free NASA API key → Worker secret `NASA_API_KEY`
-- [ ] GitHub Actions: lint + test + `wrangler deploy` + Pages build on push to `main`
+- [x] GitHub Actions: lint + test + `wrangler deploy` + Pages build on push to `main`
+  - [x] Pages reaches the Worker through a Pages Function + service binding (`apps/web/functions/api/v1/[[path]].ts`, `apps/web/wrangler.jsonc`)
 - **Done when:** a "hello" Worker and an empty Pages site are live.
 
 ## Phase 1: Backend live loop (UC1, UC2, UC5, UC8)
@@ -30,7 +31,7 @@ Contract + mock (done) ──► Frontend: Phase 2 → 3 (UI parts) → 4 (UI pa
 - [ ] Pollers for GOES X-ray and RTSW wind/mag with `If-None-Match`; adaptive 5 s polling window
 - [ ] Normalizers → `xray_sample`, `wind_sample`, memory ring buffers
 - [ ] `GET /state`, `WS /stream` (snapshot + delta), `GET /health`
-- [ ] Seed from the existing `build_snapshot.py` data so the first deploy has 3 days of history
+- [ ] Backfill from NOAA's live 7-day X-ray and RTSW 1-minute files on first start. The saved `build_snapshot.py` snapshot ends 2026-09-28 and is ~7 MB, over the Worker bundle limit, so RTSW history starts at ~1 day and grows to 7
 - **Done when:** `wscat` shows a new delta within 5 s of NOAA updating, with no browser open beforehand.
 
 ## Phase 2: Frontend live view (UF1, UF2, UF8, UF9)
