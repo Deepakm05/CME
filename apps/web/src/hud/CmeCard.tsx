@@ -1,9 +1,9 @@
 import { AU_KM } from "@cme/physics";
 import type { Cme } from "@cme/shared";
 import { activeCmes, cmeFrontKm, cmePhase, cmeSpeedAt } from "../lib/cme.ts";
-import { useServerNow } from "../lib/clock.ts";
+import { useSceneNow } from "../lib/sceneClock.ts";
 import { formatClock, formatDuration } from "../lib/travel.ts";
-import { useLive } from "../store/live.ts";
+import { useSource } from "../store/source.ts";
 import { useUi } from "../store/ui.ts";
 import { MinButton } from "./MinButton.tsx";
 
@@ -12,11 +12,11 @@ const hhmm = (t: number) => new Date(t * 1000).toISOString().slice(11, 16);
 /**
  * CMEs in flight right now (UF5): where they came from, how fast they are now, and for Earth-directed ones,
  * when they arrive (the server's drag-based forecast) with a countdown. Earth-directed first; at most two.
+ * In replay: the CMEs in flight at the replay time, from history.
  */
 export function CmeCard() {
-  const now = useServerNow();
-  const cmes = useLive((s) => s.cmes);
-  const flares = useLive((s) => s.flares);
+  const now = useSceneNow();
+  const { cmes, flares } = useSource(now);
   const minimized = useUi((s) => s.minimized.cme);
   if (now === null) return null;
   const list = activeCmes(cmes, now).slice(0, 2);

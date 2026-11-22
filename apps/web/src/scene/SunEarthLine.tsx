@@ -3,18 +3,23 @@ import { useFrame } from "@react-three/fiber";
 import { Html } from "@react-three/drei";
 import { BufferGeometry, Float32BufferAttribute, Line, LineDashedMaterial, type Group } from "three";
 import { AU_KM } from "@cme/physics";
-import { DEFAULT_WIND_KM_S, formatDuration, latest, lightSeconds, windSeconds } from "../lib/travel.ts";
-import { liveStore } from "../store/live.ts";
+import { DEFAULT_WIND_KM_S, formatDuration, lightSeconds, windSeconds } from "../lib/travel.ts";
+import { seriesNow, sourceNow } from "../store/source.ts";
 import type { Vec3 } from "../lib/ephemeris.ts";
-import { framePositions } from "./time.ts";
+import { framePositions, sceneTime } from "./time.ts";
 import { drawnRadius } from "./sizes.ts";
 import { screenDistance, showIf } from "./declutter.ts";
 
 const TEXT_EVERY_S = 0.5;
 
-/** The current solar wind speed at L1, or null before any data. Shared with the L1 label. */
+/**
+ * The solar wind speed at L1 at the scene time (the newest live; in replay, the value at the replay time), or
+ * null without data. Shared with the L1 label.
+ */
 export function liveWindSpeed(): number | null {
-  return latest(liveStore.getState().wind.view().speed);
+  const src = sourceNow();
+  const w = src.wind.view();
+  return seriesNow(src, w.t, w.speed, sceneTime());
 }
 
 /**

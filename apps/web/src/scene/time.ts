@@ -1,13 +1,12 @@
 import { useFrame } from "@react-three/fiber";
-import { serverNow } from "../lib/api.ts";
 import { positionsAt, type Positions } from "../lib/ephemeris.ts";
-import { liveStore } from "../store/live.ts";
+import { sceneTime } from "../lib/sceneClock.ts";
 
-/** The scene's "now": server time from the store clock (wall clock before the first data). */
-export function sceneTime(): number {
-  const { clock, clockAt } = liveStore.getState();
-  return clock ? serverNow(clock, clockAt) : Date.now() / 1000;
-}
+/**
+ * The scene's "now": server time live, the replay time in replay (lib/sceneClock.ts, kept free of three.js so
+ * it can be tested in Node).
+ */
+export { sceneTime };
 
 // Every component asks for positions in its own useFrame; compute them once per frame.
 let cacheKey = -1;

@@ -7,7 +7,7 @@ import { cmeDirection, cmeFrontKm } from "../lib/cme.ts";
 import { rotatedLon } from "../lib/heliographic.ts";
 import { planetPosition } from "../lib/ephemeris.ts";
 import { AU_KM } from "@cme/physics";
-import { liveStore } from "../store/live.ts";
+import { sourceNow } from "../store/source.ts";
 import { useUi, type Scale, type Selection, type View } from "../store/ui.ts";
 import { framePositions, frameSceneTime } from "./time.ts";
 import { drawnL1, drawnRadius, stepScale } from "./sizes.ts";
@@ -37,14 +37,14 @@ export function focusTarget(sel: Selection | null, p: Positions, t: number): { p
     case "sun":
       return { point: new Vector3(), size: drawnRadius("sun") * 1.4, from: new Vector3(...p.earth).normalize().addScaledVector(up, 0.12).normalize() };
     case "region": {
-      const live = liveStore.getState();
-      const r = live.regions.find((x) => x.regionNo === sel.regionNo);
+      const src = sourceNow(); // no regions in replay
+      const r = src.regions.find((x) => x.regionNo === sel.regionNo);
       if (!r) return null;
-      const dir = new Vector3(...cmeDirection(r.lat, rotatedLon(r.lon, live.regionsAt, t), p.earth));
+      const dir = new Vector3(...cmeDirection(r.lat, rotatedLon(r.lon, src.regionsAt, t), p.earth));
       return { point: dir.clone().multiplyScalar(drawnRadius("sun")), size: drawnRadius("sun") * 0.45, from: dir };
     }
     case "cme": {
-      const c = liveStore.getState().cmes.find((x) => x.id === sel.id);
+      const c = sourceNow().cmes.find((x) => x.id === sel.id); // the front's time check hides one not launched yet
       const km = c ? cmeFrontKm(c, t) : null;
       if (!c || km === null) return null;
       const dir = new Vector3(...cmeDirection(c.lat, c.lon, planetPosition("earth", c.launchAt)));

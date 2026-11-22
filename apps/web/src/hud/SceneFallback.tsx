@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Positions } from "../lib/ephemeris.ts";
-import { useServerNow } from "../lib/clock.ts";
+import { useSceneNow } from "../lib/sceneClock.ts";
 
 type Ephemeris = typeof import("../lib/ephemeris.ts");
 
@@ -17,7 +17,7 @@ const ROWS: { id: keyof Positions; label: string }[] = [
  */
 export function SceneFallback({ reason }: { reason: string }) {
   const [eph, setEph] = useState<Ephemeris | null>(null);
-  const now = useServerNow() ?? Date.now() / 1000;
+  const now = useSceneNow() ?? Date.now() / 1000;
   useEffect(() => {
     import("../lib/ephemeris.ts").then(setEph, () => setEph(null));
   }, []);

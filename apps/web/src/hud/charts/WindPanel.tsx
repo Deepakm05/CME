@@ -6,13 +6,16 @@ import { rowAt, tableRows, windowed, type Aligned } from "../../lib/chartData.ts
 import { L1_DISTANCE_AU } from "../../lib/ephemeris.ts";
 import { formatDuration, windSeconds } from "../../lib/travel.ts";
 import { bzDirection, fmtBz } from "../../lib/format.ts";
-import { liveStore, WIND_KEYS } from "../../store/live.ts";
+import { WIND_KEYS } from "../../store/live.ts";
+import { REPLAY_AFTER_S } from "../../lib/historyRange.ts";
+import { useSourceSeries } from "../../store/source.ts";
 import { DataAge } from "../DataAge.tsx";
 import { MinButton } from "../MinButton.tsx";
 import { useUi } from "../../store/ui.ts";
 import { CHART } from "./theme.ts";
 import { SYNC_KEY, useHover } from "./hover.ts";
 import { hhmm, useUplot, utc } from "./useUplot.ts";
+import { drawMarker, lastRow, upTo, type MarkerRef } from "./marker.ts";
 
 type WindKey = (typeof WIND_KEYS)[number];
 
@@ -42,7 +45,7 @@ const MEASURES: Measure[] = [
   },
 ];
 
-function sparkOptions(width: number, height: number, m: Measure, onCursor: (u: uPlot) => void): uPlot.Options {
+function sparkOptions(width: number, height: number, m: Measure, onCursor: (u: uPlot) => void, marker: MarkerRef): uPlot.Options {
   const px = uPlot.pxRatio;
   return {
     width,
@@ -83,9 +86,9 @@ function sparkOptions(width: number, height: number, m: Measure, onCursor: (u: u
       ],
       draw: [
         (u) => {
+          drawMarker(u, marker.current, null); // replay: dim what comes after the replay time
           const ys = u.data[1];
-          let i = ys.length - 1;
-          while (i >= 0 && ys[i] == null) i--;
+          const i = lastRow(u.data[0], ys, marker.current);
           if (i < 0) return;
           const { ctx } = u;
           const x = u.valToPos(u.data[0][i], "x", true);
@@ -123,21 +126,31 @@ function BzState({ bz }: { bz: number }) {
   return dir ? <span className="bz-state">{dir === "south" ? "South" : "North"}</span> : null;
 }
 
-function Tile({ m, data, xRange, hoverT, setHover }: {
+function Tile({ m, data, xRange, hoverT, setHover, markT }: {
   m: Measure; data: Aligned; xRange: [number, number]; hoverT: number | null; setHover: (t: number | null) => void;
+  /** Replay time (null live): values are read at it, later points dimmed. */
+  markT: number | null;
 }) {
   const active = useRef(false);
+  const marker = useRef<number | null>(null);
+  marker.current = markT;
   const make = useMemo(
     () => (w: number, h: number) =>
-      sparkOptions(w, h, m, (u) => {
-        if (!active.current) return;
-        const i = u.cursor.idx;
-        setHover(i == null ? null : (u.data[0][i] as number));
-      }),
+      sparkOptions(
+        w,
+        h,
+        m,
+        (u) => {
+          if (!active.current) return;
+          const i = u.cursor.idx;
+          setHover(i == null ? null : (u.data[0][i] as number));
+        },
+        marker,
+      ),
     [m, setHover],
   );
   const { box } = useUplot(make, data, xRange);
-  const latestRow = rowAt(data, Infinity);
+  const latestRow = rowAt(data, markT ?? Infinity);
   const row = hoverT === null ? latestRow : rowAt(data, hoverT);
   const v = row === null ? null : (data[1][row] as number);
 
@@ -167,21 +180,30 @@ function Tile({ m, data, xRange, hoverT, setHover }: {
   );
 }
 
-/** Solar wind at L1 (UF8): four measures with 6 h trends and a shared crosshair; values lead, ages follow. */
+/**
+ * Solar wind at L1 (UF8): four measures with 6 h trends and a shared crosshair; values lead, ages follow.
+ * Replay: history around the replay time (6 h before, 1 h after, dimmed); values are those at the replay time.
+ */
 export function WindPanel({ now }: { now: number }) {
+  const src = useSourceSeries();
+  const replay = src.replay;
+  const markT = replay ? now : null;
   const [table, setTable] = useState(false);
   const hoverT = useHover((s) => s.t);
   const setHover = useHover((s) => s.set);
-  const xRange = useMemo<[number, number]>(() => [now - STATE_WINDOW_S, now], [now]);
+  const xRange = useMemo<[number, number]>(() => [now - STATE_WINDOW_S, replay ? now + REPLAY_AFTER_S : now], [now, replay]);
+  const { wind, seriesRev } = src;
   const series = useMemo(() => {
-    const w = liveStore.getState().wind.view();
+    const w = wind.view();
     return Object.fromEntries(MEASURES.map((m) => [m.key, windowed(w.t, [w[m.key]], xRange[0], xRange[1])])) as Record<WindKey, Aligned>;
-  }, [xRange]);
+    // seriesRev: the columns are mutated in place
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [xRange, wind, seriesRev]);
 
   const speedData = series.speed;
-  const speedRow = hoverT === null ? rowAt(speedData, Infinity) : rowAt(speedData, hoverT);
+  const speedRow = rowAt(speedData, hoverT ?? markT ?? Infinity);
   const speed = speedRow === null ? null : (speedData[1][speedRow] as number);
-  const bzRow = rowAt(series.bz, hoverT ?? Infinity);
+  const bzRow = rowAt(series.bz, hoverT ?? markT ?? Infinity);
   const bzNow = bzRow === null ? null : (series.bz[1][bzRow] as number);
   const minimized = useUi((st) => st.minimized.wind);
 
@@ -192,7 +214,7 @@ export function WindPanel({ now }: { now: number }) {
           <h2 id="wind-title">Solar wind at L1</h2>
           <span className="hud-sub">
             {speed === null
-              ? "DSCOVR / ACE · last 6 h"
+              ? `DSCOVR / ACE · ${replay ? "6 h to the replay time" : "last 6 h"}`
               : `reaches Earth in ~${formatDuration(windSeconds(L1_DISTANCE_AU * AU_KM, speed))} at this speed`}
           </span>
         </div>
@@ -209,10 +231,10 @@ export function WindPanel({ now }: { now: number }) {
       <div className="hud-body">
         <div className="wind-grid" hidden={table}>
           {MEASURES.map((m) => (
-            <Tile key={m.key} m={m} data={series[m.key]} xRange={xRange} hoverT={hoverT} setHover={setHover} />
+            <Tile key={m.key} m={m} data={series[m.key]} xRange={xRange} hoverT={hoverT} setHover={setHover} markT={markT} />
           ))}
         </div>
-        {table ? <WindTable series={series} /> : null}
+        {table ? <WindTable series={markT === null ? series : (Object.fromEntries(MEASURES.map((m) => [m.key, upTo(series[m.key], markT)])) as Record<WindKey, Aligned>)} /> : null}
       </div>
     </section>
   );

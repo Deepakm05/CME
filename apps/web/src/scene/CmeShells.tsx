@@ -7,6 +7,9 @@ import type { Cme } from "@cme/shared";
 import { activeCmes, cmeDirection, cmeFrontKm, cmePhase, cmeSpeedAt } from "../lib/cme.ts";
 import { planetPosition, type Vec3 } from "../lib/ephemeris.ts";
 import { formatDuration } from "../lib/travel.ts";
+import { cmesAround } from "../lib/replayTime.ts";
+import { useIsReplay, useSceneNow } from "../lib/sceneClock.ts";
+import { useHistory } from "../store/history.ts";
 import { useLive } from "../store/live.ts";
 import { sameSelection, useUi } from "../store/ui.ts";
 import { createCmeMaterial } from "./materials.ts";
@@ -150,7 +153,22 @@ function Shell({ cme, labels }: { cme: Cme; labels: LabelState }) {
  * the server used for the ETA, in the direction they left the Sun. Warm = Earth-directed, cool = missing Earth.
  */
 export function CmeShells() {
-  const cmes = useLive((s) => s.cmes);
+  return useIsReplay() ? <ReplayCmeShells /> : <LiveCmeShells />;
+}
+
+function LiveCmeShells() {
+  return <ShellSet cmes={useLive((s) => s.cmes)} />;
+}
+
+/** Replay: the CMEs from history in flight around the replay time (re-picked once a second and on jumps). */
+function ReplayCmeShells() {
+  const now = useSceneNow();
+  const all = useHistory((s) => s.cmes);
+  const cmes = useMemo(() => (now === null ? [] : cmesAround(all, now)), [all, now]);
+  return <ShellSet cmes={cmes} />;
+}
+
+function ShellSet({ cmes }: { cmes: Cme[] }) {
   const labels = useMemo<LabelState>(() => ({ allowed: [], at: new Map() }), []);
   const lastRank = useRef(-Infinity);
   useFrame((state) => {

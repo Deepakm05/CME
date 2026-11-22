@@ -4,8 +4,7 @@ import { Html } from "@react-three/drei";
 import { Quaternion, Vector3, type Group, type Mesh, type ShaderMaterial } from "three";
 import { formatLocation } from "@cme/physics";
 import { flaresAt, spotsAt, activityFromFlux, type FlareMark, type SpotMark } from "../lib/sunActivity.ts";
-import { latest } from "../lib/travel.ts";
-import { liveStore, useLive } from "../store/live.ts";
+import { seriesNow, sourceAt, useSourceRegions } from "../store/source.ts";
 import { MAX_FLARES, MAX_SPOTS, createFlareGlowMaterial } from "./materials.ts";
 import { frameSceneTime } from "./time.ts";
 import { drawnRadius, scaleAnim } from "./sizes.ts";
@@ -24,15 +23,15 @@ const SPOT_ENLARGE_READABLE = 1.6;
  * and labels that appear only when there is room (regions in close-up, the flare from mid-distance).
  */
 export function SunActivity({ surface, corona, sunGroup }: { surface: ShaderMaterial; corona: ShaderMaterial; sunGroup: React.RefObject<Group> }) {
-  const state = useRef<{ spots: SpotMark[]; flares: FlareMark[]; activity: number; last: number }>({
-    spots: [], flares: [], activity: 0, last: -Infinity,
+  const state = useRef<{ spots: SpotMark[]; flares: FlareMark[]; activity: number; last: number; t: number }>({
+    spots: [], flares: [], activity: 0, last: -Infinity, t: 0,
   });
   const glows = useRef<(Mesh | null)[]>([]);
   const glowMats = useMemo(() => Array.from({ length: MAX_FLARES }, createFlareGlowMaterial), []);
   useEffect(() => () => glowMats.forEach((m) => m.dispose()), [glowMats]);
   const regionLabels = useRef(new Map<number, { group: Group | null; box: HTMLDivElement | null }>());
   const flareLabel = useRef<{ group: Group | null; box: HTMLDivElement | null; text: HTMLSpanElement | null }>({ group: null, box: null, text: null });
-  const regions = useLive((s) => s.regions);
+  const regions = useSourceRegions(); // none in replay
   const selectedRegion = useUi((s) => (s.selected?.kind === "region" ? s.selected.regionNo : null));
 
   /** A click on the Sun: the region whose spot is under (or right next to) the pointer, else the Sun itself. */
@@ -54,13 +53,16 @@ export function SunActivity({ surface, corona, sunGroup }: { surface: ShaderMate
     const st = state.current;
     const r = drawnRadius("sun");
 
-    if (frame.clock.elapsedTime - st.last > REFRESH_S) {
+    // Refresh 4× a second, and at once when a replay jumps (a drag on the timeline).
+    if (frame.clock.elapsedTime - st.last > REFRESH_S || Math.abs(t - st.t) > 600) {
       st.last = frame.clock.elapsedTime;
-      const live = liveStore.getState();
+      st.t = t;
+      const src = sourceAt(t); // live store, or history as of the replay time (no regions in replay)
       const enlarge = 1 + (SPOT_ENLARGE_READABLE - 1) * (1 - scaleAnim.mix);
-      st.spots = spotsAt(live.regions, live.regionsAt, t, MAX_SPOTS, enlarge);
-      st.flares = flaresAt(live.flares, t, MAX_FLARES);
-      st.activity = activityFromFlux(latest(live.xray.view().long));
+      st.spots = spotsAt(src.regions, src.regionsAt, t, MAX_SPOTS, enlarge);
+      st.flares = flaresAt(src.flares, t, MAX_FLARES);
+      const x = src.xray.view();
+      st.activity = activityFromFlux(seriesNow(src, x.t, x.long, t));
       const u = surface.uniforms;
       st.spots.forEach((s, i) => u.uSpots.value[i].set(s.dir[0], s.dir[1], s.dir[2], s.radius));
       u.uSpotCount.value = st.spots.length;

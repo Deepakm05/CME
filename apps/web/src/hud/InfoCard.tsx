@@ -5,10 +5,10 @@ import { activeCmes, cmeFrontKm, cmePhase, cmeSpeedAt } from "../lib/cme.ts";
 import { PLANETS, positionsAt, subsolarPoint, L1_DISTANCE_AU, type PlanetId } from "../lib/ephemeris.ts";
 import { rotatedLon } from "../lib/heliographic.ts";
 import { areaInEarths, daysToWestLimb, distance, elongation, flareCounts, magClassMeaning } from "../lib/info.ts";
-import { useServerNow } from "../lib/clock.ts";
+import { useSceneNow } from "../lib/sceneClock.ts";
 import { fmtBz } from "../lib/format.ts";
-import { formatClock, formatDuration, latest, lightSeconds, windSeconds } from "../lib/travel.ts";
-import { liveStore, useLive } from "../store/live.ts";
+import { formatClock, formatDuration, lightSeconds, windSeconds } from "../lib/travel.ts";
+import { seriesNow, useSource } from "../store/source.ts";
 import { useUi, type Selection } from "../store/ui.ts";
 
 const hhmm = (t: number) => new Date(t * 1000).toISOString().slice(11, 16);
@@ -23,12 +23,11 @@ const whenUtc = (t: number) => formatClock(t).replace(/ \d{4}/, "").replace(/:\d
  * flies the camera there and follows it, and Close (or Esc). Loaded lazily with the ephemeris on first click.
  */
 export default function InfoCard({ sel }: { sel: Selection }) {
-  const now = useServerNow() ?? Date.now() / 1000;
+  const now = useSceneNow() ?? Date.now() / 1000; // the replay time in replay
   const { select, setView } = useUi.getState();
-  useLive((s) => s.seriesRev); // fresh wind / X-ray values
-  const regions = useLive((s) => s.regions);
-  const flares = useLive((s) => s.flares);
-  const cmes = useLive((s) => s.cmes);
+  // live store, or history as of the replay time (re-renders with fresh wind / X-ray values)
+  const src = useSource(now);
+  const { regions, flares, cmes } = src;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && select(null);
@@ -37,12 +36,12 @@ export default function InfoCard({ sel }: { sel: Selection }) {
   }, [select]);
 
   const p = positionsAt(now);
-  const live = liveStore.getState();
-  const xray = latest(live.xray.view().long);
-  const wind = live.wind.view();
-  const speed = latest(wind.speed);
-  const bz = latest(wind.bz);
-  const density = latest(wind.density);
+  const xv = src.xray.view();
+  const xray = seriesNow(src, xv.t, xv.long, now);
+  const wind = src.wind.view();
+  const speed = seriesNow(src, wind.t, wind.speed, now);
+  const bz = seriesNow(src, wind.t, wind.bz, now);
+  const density = seriesNow(src, wind.t, wind.density, now);
 
   let title = "";
   let kicker = "";
@@ -91,7 +90,7 @@ export default function InfoCard({ sel }: { sel: Selection }) {
     }
     case "sun": {
       const counts = flareCounts(flares, now);
-      const onDisc = regions.filter((r) => Math.abs(rotatedLon(r.lon, live.regionsAt, now)) < 90);
+      const onDisc = regions.filter((r) => Math.abs(rotatedLon(r.lon, src.regionsAt, now)) < 90);
       const biggest = [...onDisc].sort((a, b) => b.areaMsh - a.areaMsh)[0];
       const inFlight = activeCmes(cmes, now);
       const fromEarth = Math.hypot(...p.earth);
@@ -101,7 +100,7 @@ export default function InfoCard({ sel }: { sel: Selection }) {
         <Facts rows={[
           ["X-rays now", xray === null ? "—" : classFromFlux(xray)],
           ["Flares, last 24 h", `C ${counts.C} · M ${counts.M} · X ${counts.X}`],
-          ["Sunspot regions on the disc", `${onDisc.length}${biggest ? ` · biggest AR ${biggest.regionNo} (${areaInEarths(biggest.areaMsh).toFixed(1)} Earths)` : ""}`],
+          ["Sunspot regions on the disc", src.replay ? "not available in replay (no history)" : `${onDisc.length}${biggest ? ` · biggest AR ${biggest.regionNo} (${areaInEarths(biggest.areaMsh).toFixed(1)} Earths)` : ""}`],
           ["CMEs in flight", inFlight.length ? `${inFlight.length} · ${inFlight.filter((c) => c.earthDirected).length} toward Earth` : "none"],
           ["From Earth", `${au(fromEarth)} · light takes ${formatDuration(lightSeconds(fromEarth))}`],
         ]} />
@@ -130,10 +129,14 @@ export default function InfoCard({ sel }: { sel: Selection }) {
       title = `AR ${sel.regionNo}`;
       kicker = "Sunspot region (NOAA)";
       if (!r) {
-        body = <p className="info-note">This region is no longer on the visible disc.</p>;
+        body = (
+          <p className="info-note">
+            {src.replay ? "Sunspot regions are not shown in replay: only today's regions are known." : "This region is no longer on the visible disc."}
+          </p>
+        );
         break;
       }
-      const lon = rotatedLon(r.lon, live.regionsAt, now);
+      const lon = rotatedLon(r.lon, src.regionsAt, now);
       const limb = daysToWestLimb(lon);
       const own = flares.filter((f) => f.regionNo === r.regionNo).sort((a, b) => b.beginAt - a.beginAt).slice(0, 4);
       body = (
@@ -159,7 +162,7 @@ export default function InfoCard({ sel }: { sel: Selection }) {
       const c = cmes.find((x) => x.id === sel.id);
       title = "CME";
       kicker = "Coronal mass ejection";
-      body = c ? <CmeFacts cme={c} now={now} flare={c.flareId ? flares.find((f) => f.id === c.flareId) : undefined} /> : <p className="info-note">This CME is no longer tracked.</p>;
+      body = c ? <CmeFacts cme={c} now={now} flare={c.flareId ? flares.find((f) => f.id === c.flareId) : undefined} /> : <p className="info-note">{src.replay ? "This CME had not left the Sun yet at the replay time." : "This CME is no longer tracked."}</p>;
       break;
     }
   }

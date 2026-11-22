@@ -4,19 +4,21 @@ import { classFromFlux } from "@cme/physics";
 import { STATE_WINDOW_S } from "@cme/shared";
 import { peak, rowAt, tableRows, windowed, type Aligned } from "../../lib/chartData.ts";
 import { fmtFlux, pow10 } from "../../lib/format.ts";
-import { liveStore } from "../../store/live.ts";
+import { REPLAY_AFTER_S } from "../../lib/historyRange.ts";
+import { useSourceSeries } from "../../store/source.ts";
 import { DataAge } from "../DataAge.tsx";
 import { MinButton } from "../MinButton.tsx";
 import { useUi } from "../../store/ui.ts";
 import { CHART } from "./theme.ts";
 import { SYNC_KEY, useHover } from "./hover.ts";
 import { hhmm, useUplot, utc } from "./useUplot.ts";
+import { drawMarker, lastRow, upTo, type MarkerRef } from "./marker.ts";
 
 const Y_MIN = 1e-9;
 const Y_MAX = 1e-3;
 const BOUNDS = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4]; // A|B|C|M|X class boundaries
 const CLASS_LABELS = ["A", "B", "C", "M", "X"];
-function options(width: number, height: number, onCursor: (u: uPlot) => void): uPlot.Options {
+function options(width: number, height: number, onCursor: (u: uPlot) => void, marker: MarkerRef): uPlot.Options {
   const px = uPlot.pxRatio;
   return {
     width,
@@ -72,11 +74,12 @@ function options(width: number, height: number, onCursor: (u: uPlot) => void): u
       draw: [
         (u) => {
           const { ctx } = u;
+          // replay: dim what comes after the replay time; the end dots sit at it
+          drawMarker(u, marker.current, marker.current === null ? null : hhmm(marker.current));
           const ends: { x: number; y: number; s: 1 | 2 }[] = [];
           for (const s of [1, 2] as const) {
             const ys = u.data[s];
-            let i = ys.length - 1;
-            while (i >= 0 && ys[i] == null) i--;
+            const i = lastRow(u.data[0], ys, marker.current);
             if (i >= 0) ends.push({ x: u.valToPos(u.data[0][i], "x", true), y: u.valToPos(ys[i] as number, "y", true), s });
           }
           ctx.save();
@@ -121,8 +124,13 @@ function options(width: number, height: number, onCursor: (u: uPlot) => void): u
 /**
  * GOES X-ray flux, last 6 h, on a log scale banded by flare class (UF4). The long channel sets the class.
  * Headline: the class right now and the 6 h peak. Crosshair is shared with the solar-wind charts.
+ * Replay: history around the replay time (6 h before, 1 h after, dimmed), with a line at it; "now" is that time.
  */
 export function XrayChart({ now }: { now: number }) {
+  const src = useSourceSeries();
+  const replay = src.replay;
+  const marker = useRef<number | null>(null);
+  marker.current = replay ? now : null;
   const [table, setTable] = useState(false);
   const minimized = useUi((st) => st.minimized.xray);
   const active = useRef(false);
@@ -130,26 +138,34 @@ export function XrayChart({ now }: { now: number }) {
   const setHover = useHover((s) => s.set);
   const [overActive, setOverActive] = useState(false);
 
-  const xRange = useMemo<[number, number]>(() => [now - STATE_WINDOW_S, now], [now]);
+  const xRange = useMemo<[number, number]>(() => [now - STATE_WINDOW_S, replay ? now + REPLAY_AFTER_S : now], [now, replay]);
+  const { xray, seriesRev } = src;
   const data: Aligned = useMemo(() => {
-    const v = liveStore.getState().xray.view();
+    const v = xray.view();
     return windowed(v.t, [v.long, v.short], xRange[0], xRange[1], { positive: true });
-  }, [xRange]);
+    // seriesRev: the columns are mutated in place
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [xRange, xray, seriesRev]);
 
   const make = useMemo(
     () => (w: number, h: number) =>
-      options(w, h, (u) => {
-        if (!active.current) return;
-        const i = u.cursor.idx;
-        setHover(i == null ? null : (u.data[0][i] as number));
-      }),
+      options(
+        w,
+        h,
+        (u) => {
+          if (!active.current) return;
+          const i = u.cursor.idx;
+          setHover(i == null ? null : (u.data[0][i] as number));
+        },
+        marker,
+      ),
     [setHover],
   );
   const { box, plot } = useUplot(make, data, xRange);
 
-  const last = rowAt(data, Infinity);
+  const last = rowAt(data, replay ? now : Infinity);
   const nowLong = last === null ? null : (data[1][last] as number);
-  const top = peak(data[1]);
+  const top = peak(replay ? data[1].slice(0, last === null ? 0 : last + 1) : data[1]);
   const at = hoverT === null ? null : rowAt(data, hoverT);
 
   const step = (dir: -1 | 1) => {
@@ -199,12 +215,12 @@ export function XrayChart({ now }: { now: number }) {
       <header className="hud-head">
         <div className="hud-title">
           <h2 id="xray-title">Solar X-rays</h2>
-          <span className="hud-sub">GOES · W/m² · last 6 h</span>
+          <span className="hud-sub">GOES · W/m² · {replay ? "6 h to the replay time" : "last 6 h"}</span>
         </div>
         <div className="hud-figure">
           <span className="hud-value">{nowLong === null ? "—" : classFromFlux(nowLong)}</span>
           <span className="hud-sub">
-            now · <DataAge ts={last === null ? null : data[0][last]} feed="goes_xray" />
+            {replay ? "then" : "now"} · <DataAge ts={last === null ? null : data[0][last]} feed="goes_xray" />
             {top ? ` · peak ${classFromFlux(top.v)} at ${hhmm(data[0][top.i])}` : ""}
           </span>
         </div>
@@ -224,7 +240,7 @@ export function XrayChart({ now }: { now: number }) {
           hidden={table}
           tabIndex={0}
           role="img"
-          aria-label={`X-ray flux over the last 6 hours. Now ${nowLong === null ? "unknown" : classFromFlux(nowLong)}. Use the left and right arrow keys to read values, or switch to the table.`}
+          aria-label={`X-ray flux over the ${replay ? "6 hours before the replay time" : "last 6 hours"}. ${replay ? "At the replay time" : "Now"} ${nowLong === null ? "unknown" : classFromFlux(nowLong)}. Use the left and right arrow keys to read values, or switch to the table.`}
           onKeyDown={onKey}
           onPointerEnter={() => {
             active.current = true;
@@ -242,7 +258,7 @@ export function XrayChart({ now }: { now: number }) {
           }}
         />
         {tip}
-        {table ? <XrayTable data={data} /> : null}
+        {table ? <XrayTable data={upTo(data, replay ? now : null)} /> : null}
       </div>
     </section>
   );

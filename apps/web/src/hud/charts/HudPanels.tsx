@@ -1,6 +1,6 @@
 import { useState } from "react";
 import "uplot/dist/uPlot.min.css";
-import { useServerNow } from "../../lib/clock.ts";
+import { useSceneNow } from "../../lib/sceneClock.ts";
 import { XrayChart } from "./XrayChart.tsx";
 import { WindPanel } from "./WindPanel.tsx";
 import { useUi } from "../../store/ui.ts";
@@ -8,10 +8,11 @@ import { useUi } from "../../store/ui.ts";
 /**
  * The Live page's data panels (step 5). Loaded lazily with uPlot, and redrawn once a second as the 6 h
  * window slides (design rule: charts at most 1 Hz; the 3D scene runs on its own). On phones the two
- * panels become tabs, solar wind first (it is what changes minute to minute).
+ * panels become tabs, solar wind first (it is what changes minute to minute). In replay they show history
+ * around the replay time instead (see store/source.ts).
  */
 export default function HudPanels() {
-  const now = useServerNow();
+  const now = useSceneNow(); // server now, or the replay time
   const [tab, setTab] = useState<"wind" | "xray">("wind");
   const min = useUi((s) => s.minimized);
   if (now === null) return <div className="hud hud-wait muted">Waiting for data…</div>;
