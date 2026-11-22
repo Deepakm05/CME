@@ -2,9 +2,9 @@
  * The in-memory state every read is served from (NFR-5): the 7-day sample rings and the feed states.
  * Rebuilt from SQLite when the Durable Object starts; updated with memory.apply() after each committed tick.
  */
-import { STATE_WINDOW_S, type FeedDef, type FeedId, type FeedStatus, type LiveState, type Unix } from "@cme/shared";
+import { STATE_WINDOW_S, type Alert, type FeedDef, type FeedId, type FeedStatus, type LiveState, type Unix } from "@cme/shared";
 import type { FeedState, Sql, WorkerFeed } from "../types.ts";
-import { loadFeedStates, loadWindSince, loadXraySince } from "../db/rows.ts";
+import { loadAlerts, loadFeedStates, loadWindSince, loadXraySince } from "../db/rows.ts";
 import { SAMPLE_RETENTION_S, type PendingTick } from "./commit.ts";
 import { windRing, windSeries, xrayRing, xraySeries, type WindRing, type XrayRing } from "./series.ts";
 
@@ -36,10 +36,17 @@ export function feedStatusChanged(a: FeedStatus, b: FeedStatus): boolean {
     || a.dataTs !== b.dataTs || a.error !== b.error || a.stale !== b.stale;
 }
 
+/** LiveState.alerts holds active alerts plus those raised or cleared in the last day. */
+export const ALERT_WINDOW_S = 86_400;
+
+const alertInWindow = (a: Alert, from: Unix) => a.clearedAt === null || a.raisedAt >= from || a.clearedAt >= from;
+
 export class Memory {
   readonly xray: XrayRing = xrayRing();
   readonly wind: WindRing = windRing();
   readonly feeds = new Map<FeedId, FeedState>();
+  /** Active alerts plus the last day's cleared ones, by id (pruneAlerts drops older ones). */
+  readonly alerts = new Map<string, Alert>();
   /** The feeds reported in LiveState, in order. */
   readonly defs: readonly WorkerFeed[];
   private cache: { seq: number; str: string } | null = null;
@@ -59,6 +66,7 @@ export class Memory {
     m.xray.append(loadXraySince(sql, from));
     m.wind.append(loadWindSince(sql, from));
     for (const [id, s] of loadFeedStates(sql, now)) m.feeds.set(id, s);
+    for (const a of loadAlerts(sql, now - ALERT_WINDOW_S)) m.alerts.set(a.id, a);
     return m;
   }
 
@@ -67,6 +75,12 @@ export class Memory {
     this.xray.append(p.xray);
     this.wind.append(p.wind);
     for (const s of p.feeds) this.feeds.set(s.id, s);
+    for (const a of p.alerts ?? []) this.alerts.set(a.id, a);
+  }
+
+  /** Drops cleared alerts that left the LiveState window. */
+  pruneAlerts(now: Unix): void {
+    for (const [id, a] of this.alerts) if (!alertInWindow(a, now - ALERT_WINDOW_S)) this.alerts.delete(id);
   }
 
   feedState(id: FeedId, now: Unix): FeedState {
@@ -78,7 +92,7 @@ export class Memory {
     return this.defs.map((d) => toFeedStatus(d, this.feedState(d.id, now), now));
   }
 
-  /** Regions, flares, CMEs and alerts are empty until Phases 3–4 fill them. */
+  /** Regions, flares and CMEs are empty until Phases 3–4 fill them. */
   liveState(seq: number, now: Unix): LiveState {
     const from = now - STATE_WINDOW_S;
     return {
@@ -89,7 +103,8 @@ export class Memory {
       regions: [],
       flares: [],
       cmes: [],
-      alerts: [],
+      alerts: [...this.alerts.values()].filter((a) => alertInWindow(a, now - ALERT_WINDOW_S))
+        .sort((a, b) => a.raisedAt - b.raisedAt || (a.id < b.id ? -1 : 1)),
       feeds: this.feedStatuses(now),
     };
   }

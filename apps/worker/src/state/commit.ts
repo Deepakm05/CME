@@ -5,10 +5,10 @@
  * deltaRing.push(...messages) → broadcast each `str`. Memory is only touched after the transaction
  * succeeded, so a failed commit leaves memory, SQLite and seq exactly as they were.
  */
-import type { Delta, FeedStatus, Unix } from "@cme/shared";
+import type { Alert, Delta, FeedStatus, Unix } from "@cme/shared";
 import type { FeedState, Sql, Transaction, WindRow, XrayRow } from "../types.ts";
 import { writeMeta } from "../db/migrate.ts";
-import { saveFeedState, upsertWind, upsertXray } from "../db/rows.ts";
+import { saveFeedState, upsertAlert, upsertWind, upsertXray } from "../db/rows.ts";
 import { sequenced, type Sequenced } from "./deltaRing.ts";
 import { windSeriesFromRows, xraySeriesFromRows } from "./series.ts";
 
@@ -24,6 +24,8 @@ export interface PendingTick {
   feeds: FeedState[];
   /** Only the FeedStatuses that visibly changed (feedStatusChanged), i.e. what clients must be told. */
   feedStatuses: FeedStatus[];
+  /** Alerts whose stored row changed and that clients must get in `delta.alerts` (e.g. a cleared TEST alert). */
+  alerts?: Alert[];
 }
 
 export const emptyTick = (): PendingTick => ({ xray: [], wind: [], feeds: [], feedStatuses: [] });
@@ -33,7 +35,7 @@ export const emptyTick = (): PendingTick => ({ xray: [], wind: [], feeds: [], fe
  * (GAP S1), e.g. a round of 304s that only bumped lastOkAt.
  */
 export function isEmpty(p: PendingTick): boolean {
-  return p.xray.length === 0 && p.wind.length === 0 && p.feedStatuses.length === 0;
+  return p.xray.length === 0 && p.wind.length === 0 && p.feedStatuses.length === 0 && !p.alerts?.length;
 }
 
 /**
@@ -52,6 +54,7 @@ export function toDelta(p: PendingTick): Delta {
   if (p.xray.length) d.xray = xraySeriesFromRows(p.xray);
   if (p.wind.length) d.wind = windSeriesFromRows(p.wind);
   if (p.feedStatuses.length) d.feeds = p.feedStatuses;
+  if (p.alerts?.length) d.alerts = p.alerts;
   return d;
 }
 
@@ -79,6 +82,7 @@ export function commitTick(sql: Sql, tx: Transaction, prevSeq: number, p: Pendin
     upsertXray(sql, p.xray);
     upsertWind(sql, p.wind);
     for (const s of p.feeds) saveFeedState(sql, s);
+    for (const a of p.alerts ?? []) upsertAlert(sql, a);
     if (visible) writeMeta(sql, "seq", String(seq));
   });
   if (!visible) return { seq, messages: [] };
