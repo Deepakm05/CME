@@ -11,11 +11,11 @@ import {
   PROTOCOL_VERSION, type Alert, type FeedId, type FeedStatus, type HealthResponse, type HelloMessage, type Unix,
 } from "@cme/shared";
 import type { FeedState, Sql, Transaction, WorkerFeed } from "./types.ts";
-import { ACTIVE_FEEDS } from "./feeds/defs.ts";
+import { ACTIVE_FEEDS, BACKFILL_AFTER_S, BACKFILL_MAX_FAILS } from "./feeds/defs.ts";
 import { afterPoll, dueFeeds, FAST_INTERVAL_S, nextWakeAt, type PollOutcome } from "./feeds/scheduler.ts";
 import { migrate, readMeta, readSeq, writeMeta } from "./db/migrate.ts";
 import { loadFeedStates, upsertAlert } from "./db/rows.ts";
-import { commitTick, emptyTick, pruneSamples, type PendingTick } from "./state/commit.ts";
+import { commitTick, emptyTick, pruneClearedAlerts, pruneSamples, type PendingTick } from "./state/commit.ts";
 import { DeltaRing, sequenced, type Sequenced } from "./state/deltaRing.ts";
 import { feedStatusChanged, Memory, toFeedStatus } from "./state/memory.ts";
 import { logEvent } from "./obs/log.ts";
@@ -23,7 +23,7 @@ import { alarmLagS as computeAlarmLag, healthStatus, LagTracker } from "./obs/me
 import { compileAllowList } from "./origin.ts";
 import { fetchDue, keepFeedEtags, mustPersist, normaliseFeed, type FeedLog } from "./tick.ts";
 import {
-  CLOSE, isIdle, MAX_CLIENT_MSG, PING_EVERY_S, trySend, tryClose, type HubSocket,
+  CLOSE, isIdle, MAX_CLIENT_MSG, PING_EVERY_S, RESYNC_COOLDOWN_MS, trySend, tryClose, type HubSocket, type SocketMeta,
 } from "./sockets.ts";
 
 export interface HubConfig {
@@ -87,8 +87,13 @@ export class HubCore {
   private readonly stored = new Map<FeedId, FeedState>();
   /** The FeedStatus clients were last told about, to detect visible changes incl. stale transitions. */
   private readonly reported = new Map<FeedId, FeedStatus>();
-  /** Feeds whose ring was empty at start: their next poll uses the backfill URLs (once). */
+  /**
+   * Feeds whose ring was empty or BACKFILL_AFTER_S old at start: their next poll uses the backfill URLs, until
+   * one succeeds or BACKFILL_MAX_FAILS in a row fail (then the feed goes back to its normal URLs).
+   */
   readonly backfill = new Set<FeedId>();
+  /** Consecutive failed backfill polls per feed. */
+  readonly backfillFails = new Map<FeedId, number>();
   private alarmMetaAtMs: number | null = null;
   private lastPingS = -Infinity;
   private lastPruneS = -Infinity;
@@ -119,11 +124,24 @@ export class HubCore {
     }
     for (const [id, st] of loadFeedStates(this.sql, now)) this.stored.set(id, st);
     for (const s of this.memory.feedStatuses(now)) this.reported.set(s.id, s);
-    if (this.memory.xray.size === 0) this.backfill.add("goes_xray");
-    if (this.memory.wind.size === 0) this.backfill.add("rtsw");
+    // An empty ring, or one left far behind by a long downtime: the backfill fills the gap, and normaliseFeed's
+    // `after` (the ring's lastTs) keeps only rows newer than what is already stored, so nothing is duplicated.
+    const needsBackfill = (lastTs: number | null) => lastTs === null || now - lastTs > BACKFILL_AFTER_S;
+    if (needsBackfill(this.memory.xray.lastTs())) this.backfill.add("goes_xray");
+    if (needsBackfill(this.memory.wind.lastTs())) this.backfill.add("rtsw");
 
     const last = readMeta(this.sql, "alarm_last_at");
     this.alarmLastAtMs = last !== null && Number.isFinite(Number(last)) ? Number(last) : null;
+  }
+
+  /**
+   * The adapter found an alarm already pending (or armed one) at startup. alarm_last_at in meta may be minutes
+   * old after a restart, so it is seeded to now: a cron watchdog landing before the first alarm must not
+   * report a stall or degrade /health. A genuinely stuck alarm is still caught WATCHDOG_STALL_MS later.
+   */
+  alarmArmedAtStart(scheduledAtMs: number, nowMs: number): void {
+    this.scheduledAtMs = scheduledAtMs;
+    this.alarmLastAtMs = nowMs;
   }
 
   log(evt: string, fields: Record<string, unknown>): void {
@@ -197,7 +215,10 @@ export class HubCore {
             if (f.backfill) backfilled.push(id);
           }
         }
-        if (outcome.kind === "error") entry.error = outcome.error;
+        if (outcome.kind === "error") {
+          entry.error = outcome.error;
+          if (f.backfill) this.backfillFailed(id, outcome.error);
+        }
         feedLog[id] = entry;
         next.set(id, afterPoll(f.feed, this.memory.feedState(id, now), now, outcome));
       }
@@ -232,7 +253,10 @@ export class HubCore {
       for (const [id, st] of next) this.memory.feeds.set(id, st);
       for (const s of p.feeds) this.stored.set(s.id, s);
       for (const s of p.feedStatuses) this.reported.set(s.id, s);
-      for (const id of backfilled) this.backfill.delete(id);
+      for (const id of backfilled) {
+        this.backfill.delete(id);
+        this.backfillFails.delete(id);
+      }
       if (res.messages.length) {
         this.ring.push(...res.messages);
         for (const m of res.messages) this.broadcast(m.str);
@@ -252,6 +276,18 @@ export class HubCore {
       this.log("tick", { seq: this.seq, ms: Date.now() - started, feeds: feedLog, sockets: this.socketCount(), msgs });
     }
     return this.nextWakeMs(now);
+  }
+
+  /** Counts a failed backfill poll; after BACKFILL_MAX_FAILS in a row the feed polls its normal URLs again. */
+  private backfillFailed(id: FeedId, error: string): void {
+    const n = (this.backfillFails.get(id) ?? 0) + 1;
+    if (n < BACKFILL_MAX_FAILS) {
+      this.backfillFails.set(id, n);
+      return;
+    }
+    this.backfill.delete(id);
+    this.backfillFails.delete(id);
+    this.log("backfill_abandoned", { level: "warn", feed: id, fails: n, error });
   }
 
   private cadence(id: FeedId): number {
@@ -302,8 +338,9 @@ export class HubCore {
     this.lastPruneS = now;
     try {
       const deleted = pruneSamples(this.sql, now);
+      const alerts = pruneClearedAlerts(this.sql, now);
       this.memory.pruneAlerts(now);
-      if (deleted) this.log("prune", { deleted });
+      if (deleted || alerts) this.log("prune", { deleted, alerts });
     } catch (e) {
       this.log("tick_error", { stage: "prune", error: e });
     }
@@ -382,7 +419,10 @@ export class HubCore {
     else for (const m of missed) trySend(ws, m.str);
   }
 
-  /** `pong` marks the socket alive; `resync` gets a snapshot. Anything else is ignored. */
+  /**
+   * `pong` marks the socket alive; `resync` gets a snapshot, at most one per RESYNC_COOLDOWN_MS per socket
+   * (extra resyncs inside the window are ignored). Anything else is ignored.
+   */
   onMessage(ws: HubSocket, data: string | ArrayBuffer, nowMs: number): void {
     if (typeof data !== "string" || data.length > MAX_CLIENT_MSG) return;
     let msg: unknown;
@@ -393,15 +433,24 @@ export class HubCore {
     }
     const type = (msg as { type?: unknown } | null)?.type;
     const now = sec(nowMs);
-    if (type === "pong" || type === "resync") {
-      try {
-        const m = ws.meta();
-        ws.setMeta({ connectedAt: m?.connectedAt ?? now, lastSeen: now, ponged: (m?.ponged ?? false) || type === "pong" });
-      } catch {
-        /* attachment is best effort */
-      }
+    if (type !== "pong" && type !== "resync") return;
+    let m: SocketMeta | null = null;
+    try {
+      m = ws.meta();
+    } catch {
+      /* attachment is best effort */
     }
-    if (type === "resync") trySend(ws, this.snapshotStr(now));
+    const lastResync = m?.lastResyncAtMs;
+    const resync = type === "resync" && (lastResync == null || nowMs - lastResync >= RESYNC_COOLDOWN_MS);
+    try {
+      const next: SocketMeta = { connectedAt: m?.connectedAt ?? now, lastSeen: now, ponged: (m?.ponged ?? false) || type === "pong" };
+      const resyncAt = resync ? nowMs : lastResync;
+      if (resyncAt != null) next.lastResyncAtMs = resyncAt;
+      ws.setMeta(next);
+    } catch {
+      /* attachment is best effort */
+    }
+    if (resync) trySend(ws, this.snapshotStr(now));
   }
 
   // ---- watchdog (§5.4, R4) ---------------------------------------------------------------------------------

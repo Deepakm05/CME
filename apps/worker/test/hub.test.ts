@@ -21,9 +21,13 @@ import { compileAllowList, originAllowed } from "../src/origin.ts";
 import { MAX_SOCKETS, type HubSocket, type SocketMeta } from "../src/sockets.ts";
 import { FEED_PERSIST_EVERY_S, mustPersist } from "../src/tick.ts";
 import { readSeq } from "../src/db/migrate.ts";
-import { upsertFlare } from "../src/db/rows.ts";
+import { upsertAlert, upsertFlare } from "../src/db/rows.ts";
 import type { FeedState, WorkerFeed } from "../src/types.ts";
-import { FEED_DEFS } from "@cme/shared";
+import { FEED_DEFS, LIMITS, type Alert } from "@cme/shared";
+import { fetchDue } from "../src/tick.ts";
+import { BACKFILL_MAX_FAILS, GOES_XRAY } from "../src/feeds/defs.ts";
+import { ALERT_RETENTION_S, pruneClearedAlerts } from "../src/state/commit.ts";
+import { capAlerts, defaultFeedState } from "../src/state/memory.ts";
 
 // ---- harness ----------------------------------------------------------------------------------------------
 
@@ -215,7 +219,8 @@ describe("tick", () => {
       url.includes("/rtsw/")
         ? new Promise<Response>((_r, rej) => init?.signal?.addEventListener("abort", () => rej(init.signal!.reason)))
         : fetch(url, init)) as typeof fetch;
-    const h = makeHub({ fetchFn: hanging, pollTimeoutMs: 100 });
+    // 1 s, not 100 ms: the 7-day backfill from the fixture server can take over 100 ms on a busy machine.
+    const h = makeHub({ fetchFn: hanging, pollTimeoutMs: 1000 });
     const ws = h.open();
     const t0 = Date.now();
     await h.tick();
@@ -559,5 +564,239 @@ describe("ops", () => {
       assert.ok(!h.logs.join("\n").includes(SECRET), h.logs.join("\n"));
       assert.ok(!JSON.stringify(h.db.sql.exec("SELECT * FROM feed_status").toArray()).includes(SECRET));
     }
+  });
+});
+
+// ---- review fixes ------------------------------------------------------------------------------------------
+
+const alert = (id: string, raisedAt: number, clearedAt: number | null): Alert => ({
+  id, rule: "TEST", level: "watch", title: "t", message: "m", refType: "test", refId: id, raisedAt, clearedAt,
+});
+
+describe("backfill", () => {
+  test("a backfill poll gets the 15 MB body cap; a live poll keeps 5 MB", async () => {
+    const big = (async () =>
+      new Response("[]", { status: 200, headers: { "content-type": "application/json", "content-length": "6000000" } })) as unknown as typeof fetch;
+    const states = new Map([["goes_xray" as const, defaultFeedState("goes_xray", 0)]]);
+    const [bf] = await fetchDue([GOES_XRAY], states, "http://x", new Set(["goes_xray"]), { fetchFn: big });
+    assert.equal(bf.backfill, true);
+    assert.equal(bf.result.ok, true, JSON.stringify(bf.result));
+    const [live] = await fetchDue([GOES_XRAY], states, "http://x", new Set(), { fetchFn: big });
+    assert.equal(live.backfill, false);
+    assert.ok(!live.result.ok && /response over 5000000 bytes/.test(live.result.error), JSON.stringify(live.result));
+  });
+
+  test("a backfill that fails 3 times in a row is dropped, logged, and the feed goes live on its normal URL", async () => {
+    clock = T_START;
+    const fetchFn = ((url: string, init?: RequestInit) =>
+      url.endsWith("/xrays-7-day.json") ? Promise.resolve(new Response("down", { status: 500 })) : fetch(url, init)) as typeof fetch;
+    const h = makeHub({ fetchFn });
+    for (let i = 1; i <= BACKFILL_MAX_FAILS; i++) {
+      await h.tick();
+      assert.equal(h.core.backfill.has("goes_xray"), i < BACKFILL_MAX_FAILS, `after ${i} failures`);
+      clock += 300_000; // past the backoff
+    }
+    const line = h.logs.find((l) => l.includes('"evt":"backfill_abandoned"'));
+    assert.ok(line, h.logs.join("\n"));
+    assert.equal(JSON.parse(line).feed, "goes_xray");
+    assert.ok(!h.core.backfillFails.has("goes_xray"));
+
+    h.fetched.length = 0;
+    await h.tick();
+    assert.ok(h.fetched.some((u) => u.endsWith("/xrays-6-hour.json")), "normal URL");
+    assert.ok(!h.fetched.some((u) => u.endsWith("/xrays-7-day.json")));
+    assert.ok(h.core.memory.xray.size > 300, `live again: ${h.core.memory.xray.size} rows`);
+    assert.equal(h.core.memory.feedState("goes_xray", 0).error, null);
+  });
+
+  test("the failure count resets when a backfill succeeds", async () => {
+    clock = T_START;
+    let fail = true;
+    const fetchFn = ((url: string, init?: RequestInit) =>
+      fail && url.endsWith("/xrays-7-day.json") ? Promise.resolve(new Response("down", { status: 500 })) : fetch(url, init)) as typeof fetch;
+    const h = makeHub({ fetchFn });
+    await h.tick();
+    assert.equal(h.core.backfillFails.get("goes_xray"), 1);
+    fail = false;
+    clock += 300_000;
+    await h.tick();
+    assert.equal(h.core.backfill.has("goes_xray"), false);
+    assert.equal(h.core.backfillFails.has("goes_xray"), false);
+    assert.equal(h.fetched.filter((u) => u.endsWith("/xrays-7-day.json")).length, 2);
+  });
+
+  test("after more than 5 h down, the restart backfills and fills the gap without duplicating rows", async () => {
+    // The fixture server can't move 6 h ahead, so the downtime is made by cutting the last 6 h out of storage:
+    // the restarted hub then finds rings whose newest sample is 6 h older than now.
+    clock = T_START;
+    const db = openTestDb();
+    const a = makeHub({ db });
+    await a.tick();
+    const cut = (hours: number) => {
+      for (const table of ["xray_sample", "wind_sample"]) {
+        db.sql.exec(`DELETE FROM ${table} WHERE ts > ?`, Math.floor(clock / 1000) - hours * 3600);
+      }
+    };
+    cut(4); // 4 h: the normal files still cover the gap
+    assert.equal(makeHub({ db }).core.backfill.size, 0);
+
+    cut(6);
+    const b = makeHub({ db });
+    const xrayLast = b.core.memory.xray.lastTs()!;
+    const windLast = b.core.memory.wind.lastTs()!;
+    assert.deepEqual([...b.core.backfill].sort(), ["goes_xray", "rtsw"]);
+    const sizeBefore = b.core.memory.xray.size;
+    const ws = b.open();
+    await b.tick();
+    assert.ok(b.fetched.some((u) => u.endsWith("/xrays-7-day.json")));
+    const [d] = deltas(ws);
+    assert.ok(d.data.xray!.t[0] > xrayLast && d.data.wind!.t[0] > windLast, "only rows after the ring's lastTs");
+    assert.ok(d.data.xray!.t.length >= 355, `gap rows ${d.data.xray!.t.length}`);
+    assert.equal(b.core.memory.xray.size, sizeBefore + d.data.xray!.t.length);
+    assert.equal(count(b.db, "xray_sample"), b.core.memory.xray.size, "SQLite and memory agree");
+    assert.equal(count(b.db, "wind_sample"), b.core.memory.wind.size);
+    const ts = b.db.sql.exec<{ ts: number }>("SELECT ts FROM xray_sample ORDER BY ts").toArray().map((r) => r.ts);
+    assert.ok(ts.some((t) => t > xrayLast && t < xrayLast + 3 * 3600), "the middle of the gap is filled");
+    assert.equal(b.core.backfill.size, 0);
+    ws.assertValid();
+  });
+});
+
+describe("watchdog after restart", () => {
+  test("an alarm found pending at startup seeds alarm-last-at, so the watchdog reports no stall", async () => {
+    clock = T_START;
+    const db = openTestDb();
+    const a = makeHub({ db });
+    await a.tick(); // writes meta.alarm_last_at
+
+    clock += 10 * 60_000;
+    const stale = makeHub({ db });
+    assert.equal(stale.core.watchdog(clock), true, "without the seed the old meta value looks like a stall");
+
+    const b = makeHub({ db });
+    b.core.alarmArmedAtStart(clock + 1000, clock);
+    assert.equal(b.core.scheduledAtMs, clock + 1000);
+    assert.equal(b.core.watchdog(clock + 20_000), false);
+    assert.equal(b.core.currentAlarmLagS(clock + 500), 0);
+    assert.ok(!b.logs.some((l) => l.includes('"evt":"watchdog"')));
+    assert.equal(b.core.watchdog(clock + 40_000), true, "a genuinely stuck alarm is still caught");
+  });
+});
+
+describe("alert caps and retention", () => {
+  test("capAlerts keeps every active alert, then the newest cleared, sorted by raisedAt", () => {
+    const list: Alert[] = [];
+    for (let i = 0; i < 50; i++) list.push(alert(`A${i}`, 1000 + i, null));
+    for (let i = 0; i < 600; i++) list.push(alert(`C${i}`, 500 + i, 2000 + i));
+    const out = capAlerts(list);
+    assert.equal(out.length, LIMITS.alerts);
+    assert.equal(out.filter((a) => a.clearedAt === null).length, 50);
+    const cleared = out.filter((a) => a.clearedAt !== null).map((a) => a.clearedAt!);
+    assert.equal(Math.min(...cleared), 2000 + 600 - (LIMITS.alerts - 50), "the newest cleared ones");
+    assert.ok(out.every((a, i) => i === 0 || out[i - 1].raisedAt <= a.raisedAt));
+    assert.equal(capAlerts(list.slice(0, 3)).length, 3);
+  });
+
+  test("LiveState and /events never carry more than LIMITS.alerts alerts", async () => {
+    clock = T_START;
+    const h = makeHub();
+    await h.tick();
+    const now = Math.floor(clock / 1000);
+    for (let i = 0; i < 20; i++) {
+      const a = alert(`TEST:act${i}`, now - 7200 + i, null);
+      upsertAlert(h.db.sql, a);
+      h.core.memory.alerts.set(a.id, a);
+    }
+    for (let i = 0; i < 600; i++) {
+      const a = alert(`TEST:clr${i}`, now - 3600 + i, now - 3000 + i);
+      upsertAlert(h.db.sql, a);
+      h.core.memory.alerts.set(a.id, a);
+    }
+    const st = h.core.memory.liveState(h.core.seq, now);
+    assert.equal(st.alerts.length, LIMITS.alerts);
+    assert.equal(st.alerts.filter((a) => a.clearedAt === null).length, 20);
+    assert.ok(checkLiveState(JSON.parse(JSON.stringify(st))).ok, "client validation passes");
+    const ws = h.open();
+    ws.assertValid();
+
+    const ev = await h.get("/api/v1/events?type=alert");
+    const p = eventsResponseSchema.safeParse(ev.body);
+    assert.ok(p.success);
+    assert.equal(p.data.alerts!.length, LIMITS.alerts);
+    assert.equal(p.data.alerts!.filter((a) => a.clearedAt === null).length, 20);
+  });
+
+  test("pruneClearedAlerts deletes alerts cleared over 30 days ago, in batches; the hourly prune runs it", async () => {
+    clock = T_START;
+    const db = openTestDb();
+    makeHub({ db }); // migrates
+    const now = Math.floor(clock / 1000);
+    const old = now - ALERT_RETENTION_S - 60;
+    db.tx(() => {
+      for (let i = 0; i < 2100; i++) upsertAlert(db.sql, alert(`TEST:old${i}`, old - 100, old));
+    });
+    upsertAlert(db.sql, alert("TEST:recent", now - 40 * 86400, now - 29 * 86400));
+    upsertAlert(db.sql, alert("TEST:active", now - 60 * 86400, null));
+    assert.equal(pruneClearedAlerts(db.sql, now), 2100);
+    assert.deepEqual(db.sql.exec<{ id: string }>("SELECT id FROM alert ORDER BY id").toArray().map((r) => r.id), ["TEST:active", "TEST:recent"]);
+
+    upsertAlert(db.sql, alert("TEST:old", old - 100, old));
+    const h = makeHub({ db, fetchFn: (async () => new Response(null, { status: 304 })) as unknown as typeof fetch });
+    await h.tick();
+    assert.equal(count(db, "alert"), 2);
+    assert.ok(h.logs.some((l) => l.includes('"evt":"prune"') && l.includes('"alerts":1')), h.logs.join("\n"));
+  });
+});
+
+describe("stream and HTTP extras", () => {
+  test("resync: at most one snapshot per socket per 5 s, tracked in the socket attachment", async () => {
+    clock = T_START;
+    const h = makeHub();
+    await h.tick();
+    const ws = h.open();
+    const snaps = () => ws.msgs.filter((m) => m.type === "snapshot").length;
+    const resync = (ms: number) => h.core.onMessage(ws, JSON.stringify({ type: "resync" }), ms);
+    assert.equal(snaps(), 1); // the one sent on open
+    resync(clock);
+    assert.equal(snaps(), 2);
+    assert.equal(ws.meta()!.lastResyncAtMs, clock);
+    resync(clock + 1000);
+    resync(clock + 4999);
+    assert.equal(snaps(), 2, "ignored inside the window");
+    assert.equal(ws.meta()!.lastSeen, Math.floor((clock + 4999) / 1000), "still counts as activity");
+    h.core.onMessage(ws, JSON.stringify({ type: "pong" }), clock + 2000);
+    assert.equal(ws.meta()!.lastResyncAtMs, clock, "a pong keeps the resync time");
+
+    // After hibernation (a new HubCore over the same attachment) the window still holds.
+    const h2 = makeHub({ db: h.db });
+    h2.core.onMessage(ws, JSON.stringify({ type: "resync" }), clock + 3000);
+    assert.equal(snaps(), 2);
+    resync(clock + 5000);
+    assert.equal(snaps(), 3);
+    ws.assertValid();
+  });
+
+  test("HEAD on GET routes: same status and headers, no body", async () => {
+    clock = T_START;
+    const h = makeHub();
+    await h.tick();
+    const now = Math.floor(clock / 1000);
+    for (const path of [
+      "/api/v1/state", "/api/v1/health", `/api/v1/history?series=xray&from=${now - 3600}&to=${now}`, "/api/v1/events",
+      "/api/v1/history?series=sun", "/api/v1/nope", "/api/v1/admin/test-alert",
+    ]) {
+      const g = h.req(path);
+      const r = h.req(path, { method: "HEAD" });
+      assert.ok(g.kind === "http" && r.kind === "http");
+      assert.equal(r.res.status, g.res.status, path);
+      assert.deepEqual([...r.res.headers], [...g.res.headers], path);
+      assert.equal(r.res.body, null, path);
+      assert.equal(await r.res.text(), "");
+    }
+    const etag = `"${h.core.seq}"`;
+    const c = h.req("/api/v1/state", { method: "HEAD", headers: { "if-none-match": etag } });
+    assert.ok(c.kind === "http" && c.res.status === 304);
+    const s = h.req("/api/v1/stream", { method: "HEAD", headers: { upgrade: "websocket" } });
+    assert.ok(s.kind === "http" && s.res.status === 426 && s.res.body === null);
   });
 });

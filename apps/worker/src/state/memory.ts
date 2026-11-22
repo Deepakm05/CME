@@ -2,7 +2,7 @@
  * The in-memory state every read is served from (NFR-5): the 7-day sample rings and the feed states.
  * Rebuilt from SQLite when the Durable Object starts; updated with memory.apply() after each committed tick.
  */
-import { STATE_WINDOW_S, type Alert, type FeedDef, type FeedId, type FeedStatus, type LiveState, type Unix } from "@cme/shared";
+import { LIMITS, STATE_WINDOW_S, type Alert, type FeedDef, type FeedId, type FeedStatus, type LiveState, type Unix } from "@cme/shared";
 import type { FeedState, Sql, WorkerFeed } from "../types.ts";
 import { loadAlerts, loadFeedStates, loadWindSince, loadXraySince } from "../db/rows.ts";
 import { SAMPLE_RETENTION_S, type PendingTick } from "./commit.ts";
@@ -40,6 +40,20 @@ export function feedStatusChanged(a: FeedStatus, b: FeedStatus): boolean {
 export const ALERT_WINDOW_S = 86_400;
 
 const alertInWindow = (a: Alert, from: Unix) => a.clearedAt === null || a.raisedAt >= from || a.clearedAt >= from;
+
+const byRaised = (a: Alert, b: Alert) => a.raisedAt - b.raisedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+
+/**
+ * At most `limit` alerts (LIMITS.alerts: the client rejects a longer list): every active alert first (newest
+ * raised if even those are too many), then the most recently cleared ones. Returned sorted by raisedAt, id.
+ */
+export function capAlerts(alerts: readonly Alert[], limit: number = LIMITS.alerts): Alert[] {
+  if (alerts.length <= limit) return [...alerts].sort(byRaised);
+  const active = alerts.filter((a) => a.clearedAt === null).sort((a, b) => byRaised(b, a));
+  const cleared = alerts.filter((a) => a.clearedAt !== null)
+    .sort((a, b) => b.clearedAt! - a.clearedAt! || byRaised(b, a));
+  return [...active, ...cleared].slice(0, limit).sort(byRaised);
+}
 
 export class Memory {
   readonly xray: XrayRing = xrayRing();
@@ -103,8 +117,7 @@ export class Memory {
       regions: [],
       flares: [],
       cmes: [],
-      alerts: [...this.alerts.values()].filter((a) => alertInWindow(a, now - ALERT_WINDOW_S))
-        .sort((a, b) => a.raisedAt - b.raisedAt || (a.id < b.id ? -1 : 1)),
+      alerts: capAlerts([...this.alerts.values()].filter((a) => alertInWindow(a, now - ALERT_WINDOW_S))),
       feeds: this.feedStatuses(now),
     };
   }

@@ -29,8 +29,16 @@ export const RTSW: WorkerFeed = {
 /** Feeds polled in this phase, in poll order. */
 export const ACTIVE_FEEDS: readonly WorkerFeed[] = [GOES_XRAY, RTSW];
 
-/** One-off backfill when the DB is empty (PLAN Phase 1). RTSW's 1-minute files only cover about a day. */
+/**
+ * One-off backfill when a feed's ring is empty or BACKFILL_AFTER_S old at startup (PLAN Phase 1). The X-ray file
+ * covers 7 days; RTSW's 1-minute files only cover about a day. Backfill polls get BACKFILL_MAX_BYTES (poll.ts).
+ */
 export const BACKFILL_URLS = {
   goes_xray: (base: string) => [`${base}/json/goes/primary/xrays-7-day.json`],
   rtsw: (base: string) => RTSW.urls(base),
 } as const;
+
+/** At startup, a feed whose newest sample is older than this is backfilled (the normal X-ray file covers 6 h). */
+export const BACKFILL_AFTER_S = 5 * 3600;
+/** A feed whose backfill fails this many times in a row goes back to its normal URLs. */
+export const BACKFILL_MAX_FAILS = 3;

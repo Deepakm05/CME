@@ -19,7 +19,10 @@ export interface PollOpts {
 }
 
 const DEFAULT_TIMEOUT_MS = 8000;
-const DEFAULT_MAX_BYTES = 5_000_000;
+/** Body cap for a live poll. */
+export const DEFAULT_MAX_BYTES = 5_000_000;
+/** Body cap for a one-off backfill poll: NOAA's xrays-7-day.json alone is about 4.6 MB. */
+export const BACKFILL_MAX_BYTES = 15_000_000;
 
 async function readCapped(res: Response, maxBytes: number, shownUrl: string): Promise<string> {
   const tooBig = () => new FeedError(`response over ${maxBytes} bytes ${shownUrl}`);

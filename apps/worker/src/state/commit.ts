@@ -14,6 +14,8 @@ import { windSeriesFromRows, xraySeriesFromRows } from "./series.ts";
 
 /** How long samples are kept, in SQLite and in the memory rings. */
 export const SAMPLE_RETENTION_S = 7 * 86_400;
+/** Cleared alerts are deleted this long after they cleared (§4.4); active alerts are never pruned. */
+export const ALERT_RETENTION_S = 30 * 86_400;
 
 export interface PendingTick {
   /** New X-ray rows, ascending, all newer than what memory holds. */
@@ -105,6 +107,25 @@ export function pruneSamples(sql: Sql, now: Unix, batch = 1000): number {
       total += n;
       if (n < batch) break;
     }
+  }
+  return total;
+}
+
+/**
+ * Deletes alerts cleared more than ALERT_RETENTION_S ago (§4.4), at most `batch` rows per statement, until none
+ * are left. Returns the number of rows deleted. Run with pruneSamples, about once an hour.
+ */
+export function pruneClearedAlerts(sql: Sql, now: Unix, batch = 1000): number {
+  const cutoff = now - ALERT_RETENTION_S;
+  let total = 0;
+  for (;;) {
+    const n = sql.exec<{ id: string }>(
+      `DELETE FROM alert WHERE id IN (SELECT id FROM alert WHERE cleared_at IS NOT NULL AND cleared_at < ? LIMIT ?)
+       RETURNING id`,
+      cutoff, batch,
+    ).toArray().length;
+    total += n;
+    if (n < batch) break;
   }
   return total;
 }

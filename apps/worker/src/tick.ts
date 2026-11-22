@@ -8,7 +8,7 @@ import type { FeedState, WindRow, WorkerFeed, XrayRow } from "./types.ts";
 import { BACKFILL_URLS } from "./feeds/defs.ts";
 import { normalizeGoesXray } from "./feeds/goes.ts";
 import { normalizeRtsw } from "./feeds/rtsw.ts";
-import { pollFeed, type FeedPoll, type PollOpts } from "./feeds/poll.ts";
+import { BACKFILL_MAX_BYTES, pollFeed, type FeedPoll, type PollOpts } from "./feeds/poll.ts";
 import { redact } from "./obs/log.ts";
 
 /** What one feed's poll produced, before normalising. */
@@ -29,8 +29,8 @@ function backfillFeed(feed: WorkerFeed): WorkerFeed | null {
 
 /**
  * Polls every feed in `due` in parallel. One feed's failure (timeout, HTTP error, bad JSON, even a thrown
- * bug) never affects another's result [R1]. A backfill poll uses the backfill URLs and no ETags, so a stale
- * validator can't turn it into a 304.
+ * bug) never affects another's result [R1]. A backfill poll uses the backfill URLs, no ETags (so a stale
+ * validator can't turn it into a 304) and the larger BACKFILL_MAX_BYTES body cap.
  */
 export async function fetchDue(
   due: readonly WorkerFeed[],
@@ -46,7 +46,9 @@ export async function fetchDue(
       const st = states.get(feed.id);
       if (!st) throw new Error(`no state for ${feed.id}`);
       try {
-        const poll = await pollFeed(bf ?? feed, base, bf ? { ...st, etags: {} } : st, opts);
+        const poll = bf
+          ? await pollFeed(bf, base, { ...st, etags: {} }, { ...opts, maxBytes: BACKFILL_MAX_BYTES })
+          : await pollFeed(feed, base, st, opts);
         return { feed, backfill: bf !== null, ms: Date.now() - t0, result: { ok: true, poll } };
       } catch (e) {
         return { feed, backfill: bf !== null, ms: Date.now() - t0, result: { ok: false, error: errorText(e) } };

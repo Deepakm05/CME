@@ -37,9 +37,13 @@ export class SpaceWeatherHub extends DurableObject<Env> {
         },
         Date.now(),
       );
-      const at = await storage.getAlarm();
-      if (at === null) await this.arm(Date.now());
-      else this.core.scheduledAtMs = at;
+      let at = await storage.getAlarm();
+      if (at === null) {
+        at = Date.now();
+        await storage.setAlarm(at);
+      }
+      // Seeds the in-memory alarm-last-at to now, so the watchdog doesn't see the restart as a stall.
+      this.core.alarmArmedAtStart(at, Date.now());
     });
   }
 

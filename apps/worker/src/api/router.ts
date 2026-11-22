@@ -21,24 +21,36 @@ export type Routed =
 
 const http = (res: Response): Routed => ({ kind: "http", res });
 
+/**
+ * HEAD is answered as the GET it stands for, with the same status and headers and no body (a HEAD on
+ * /stream gets the 426 a plain GET gets: it can't upgrade).
+ */
 export function route(core: HubCore, req: Request, nowMs: number): Routed {
   try {
-    return dispatch(core, req, nowMs);
+    if (req.method !== "HEAD") return dispatch(core, req, nowMs);
+    const r = dispatch(core, req, nowMs);
+    if (r.kind !== "http") return http(errorJson(426, "expected a WebSocket upgrade", { Upgrade: "websocket" }));
+    return http(headOf(r.res));
   } catch (e) {
     core.log("http_error", { method: req.method, path: new URL(req.url).pathname, error: e });
     return http(errorJson(500, "internal error"));
   }
 }
 
+function headOf(res: Response): Response {
+  void res.body?.cancel().catch(() => {});
+  return new Response(null, { status: res.status, headers: res.headers });
+}
+
 function dispatch(core: HubCore, req: Request, nowMs: number): Routed {
   const url = new URL(req.url);
   const path = url.pathname.startsWith(`${API_PREFIX}/`) ? url.pathname.slice(API_PREFIX.length) : null;
   const now = Math.floor(nowMs / 1000);
-  const m = req.method;
+  const m = req.method === "HEAD" ? "GET" : req.method;
   if (path === null) return http(notFound(m, url.pathname));
 
   if (m === "GET" && path === "/stream") {
-    if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    if (req.method === "HEAD" || req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return http(errorJson(426, "expected a WebSocket upgrade", { Upgrade: "websocket" }));
     }
     if (!originAllowed(req.headers.get("origin"), core.allowOrigins)) return { kind: "ws-reject", code: CLOSE.ORIGIN, reason: "origin not allowed" };

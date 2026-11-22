@@ -12,6 +12,8 @@ export interface SocketMeta {
   lastSeen: Unix;
   /** The client has answered a ping at least once, so it takes part in the keep-alive (see IDLE_CLOSE_S). */
   ponged: boolean;
+  /** When this socket last got a resync snapshot (ms); absent if never. Kept here because sockets hibernate. */
+  lastResyncAtMs?: number;
 }
 
 export interface HubSocket {
@@ -29,6 +31,8 @@ export const PING_EVERY_S = 15;
  * them, and the runtime reports their sockets closed when the TCP connection goes.
  */
 export const IDLE_CLOSE_S = 45;
+/** A socket gets at most one resync snapshot per this long; extra resyncs inside it are ignored. */
+export const RESYNC_COOLDOWN_MS = 5000;
 /** Client messages longer than this are ignored. */
 export const MAX_CLIENT_MSG = 1024;
 
