@@ -3,8 +3,9 @@
  *
  * - default: the mock, started in-process on a random port at 600× speed (so deltas arrive every second);
  * - CONTRACT_BASE_URL=https://… : any running server (the Worker under `wrangler dev`, staging, …).
- *   CONTRACT_CONTROL=mock adds the /mock/* controls when that server is a mock; otherwise tests that need
- *   to trigger events on demand are skipped.
+ *   CONTRACT_CONTROL=mock adds the /mock/* controls when that server is a mock;
+ *   CONTRACT_CONTROL=worker drives the real Worker through POST /api/v1/admin/test-alert (needs CONTRACT_ADMIN_TOKEN);
+ *   otherwise tests that need to trigger events on demand are skipped.
  */
 import type { AddressInfo } from "node:net";
 import { API_PREFIX, checkServerMessage, type ServerMessage } from "@cme/shared";
@@ -27,12 +28,25 @@ const mockControl = (base: string): Control => ({
   testAlert: async () => (await (await fetch(`${base}/mock/alert`, { method: "POST", body: "{}" })).json()).id,
 });
 
+const workerControl = (base: string): Control => ({
+  testAlert: async () => {
+    const res = await fetch(`${base}${API_PREFIX}/admin/test-alert`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${process.env.CONTRACT_ADMIN_TOKEN ?? ""}` },
+    });
+    if (!res.ok) throw new Error(`admin/test-alert answered ${res.status}`);
+    return ((await res.json()) as { id: string }).id;
+  },
+});
+
 export async function startTarget(): Promise<Target> {
   const url = process.env.CONTRACT_BASE_URL;
   if (url) {
     const base = url.replace(/\/$/, "");
     const isMock = process.env.CONTRACT_CONTROL === "mock";
-    return { base, isMock, control: isMock ? mockControl(base) : null, close: async () => {} };
+    const mode = process.env.CONTRACT_CONTROL;
+    const control = mode === "mock" ? mockControl(base) : mode === "worker" ? workerControl(base) : null;
+    return { base, isMock, control, close: async () => {} };
   }
   const { startMockServer } = await import("@cme/mock/server");
   const { loadFixtures } = await import("@cme/mock/fixtures");

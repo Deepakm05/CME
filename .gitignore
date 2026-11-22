@@ -4,3 +4,8 @@ __pycache__/
 Thumbs.db
 node_modules/
 dist/
+
+# Wrangler local dev: secrets and local Durable Object state
+.dev.vars*
+.wrangler/
+!.dev.vars.example
