@@ -1,5 +1,7 @@
 # Backend Design
 
+> Detailed design (as built and planned): [DETAILED_DESIGN.md](DETAILED_DESIGN.md).
+
 Cloudflare Worker + one Durable Object (`SpaceWeatherHub`) that **polls, computes, stores and pushes** without stopping. Stack and hosting details are in [../TECH_STACK.md](../TECH_STACK.md).
 
 Diagrams are built in Excalidraw. The editable sources are in [diagrams/src/](diagrams/src/), and the generator is [../_tools/backend_diagrams.py](../_tools/backend_diagrams.py).
@@ -15,7 +17,7 @@ Diagrams are built in Excalidraw. The editable sources are in [diagrams/src/](di
 
 | Noun | Meaning |
 |---|---|
-| Feed / FeedStatus | One upstream URL and its cadence / last success, data age, error |
+| Feed / FeedStatus | One upstream URL and its cadence, stale threshold / last success, data age, error |
 | XraySample, WindSample | 1-minute GOES and L1 measurements |
 | Flare, SunspotRegion | Detected flare and the region it came from |
 | CME, ArrivalForecast | DONKI CME and our drag-based model (DBM) ETA at Earth |
@@ -28,7 +30,7 @@ Diagrams are built in Excalidraw. The editable sources are in [diagrams/src/](di
 
 ![db schema](diagrams/02-db-schema.png)
 
-Full DDL: [schema.sql](schema.sql). Retention: samples 7 days, events 30 days, `delta_log` 1 hour.
+Full DDL: [schema.sql](schema.sql). Retention: samples 7 days, events 30 days. The 1-hour delta log lives in memory only (not a table).
 
 ## 3. Data flow & endpoints
 
@@ -39,7 +41,7 @@ Full DDL: [schema.sql](schema.sql). Retention: samples 7 days, events 30 days, `
 | Method | Path | Returns | Served from |
 |---|---|---|---|
 | GET | `/api/v1/state` | Full `LiveState` (bootstrap) | memory |
-| WS | `/api/v1/stream?since=<seq>` | `snapshot`, then `delta` / `alert` / `ping` | memory + `delta_log` |
+| WS | `/api/v1/stream?since=<seq>` | `snapshot`, then `delta` / `alert` / `ping` | memory + delta ring |
 | GET | `/api/v1/history?series=xray\|wind&res=1m\|5m&from&to` | Columnar arrays | memory, edge-cached 60 s |
 | GET | `/api/v1/events?type=flare\|cme\|alert&since=` | Event list | SQLite (small) |
 | GET | `/api/v1/regions` | Today's sunspot regions | memory |
