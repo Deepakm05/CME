@@ -188,7 +188,9 @@ test("loadHistory fills both series in time order, covers the window and loads e
 
 test("a second load inside the loaded range makes no request; outside it reloads", async () => {
   const h = harness();
-  const t = simNow() - 3 * 86_400;
+  // 120 s into a 5-min bucket, so t+540 and t+600 fall in the same bucket and snap to the same window.
+  // (An unaligned t made this flaky: when a bucket edge fell between them, t+540 correctly needed a reload.)
+  const t = snapDown(simNow() - 3 * 86_400, "5m") + 120;
   await h.load(t);
   const n = h.requests.length;
   const rev = h.state().seriesRev;
