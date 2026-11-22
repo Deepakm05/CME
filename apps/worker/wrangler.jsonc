@@ -1,0 +1,29 @@
+// Cloudflare config for the backend (docs/design/backend/DETAILED_DESIGN.md, TECH_STACK.md).
+// Secrets (never in this file): NASA_API_KEY, ADMIN_TOKEN -> `wrangler secret put <NAME> [--env staging]`.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "cme-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "observability": { "enabled": true },
+  "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "SpaceWeatherHub" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SpaceWeatherHub"] }],
+  "triggers": { "crons": ["* * * * *"] },
+  "vars": {
+    "ENVIRONMENT": "production",
+    "ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173",
+    "FEED_BASE": "https://services.swpc.noaa.gov"
+  },
+  "env": {
+    "staging": {
+      "name": "cme-worker-staging",
+      "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "SpaceWeatherHub" }] },
+      "triggers": { "crons": ["* * * * *"] },
+      "vars": {
+        "ENVIRONMENT": "staging",
+        "ALLOWED_ORIGINS": "http://localhost:5173,https://*.cme-web.pages.dev",
+        "FEED_BASE": "https://services.swpc.noaa.gov"
+      }
+    }
+  }
+}

@@ -10,7 +10,7 @@ import type {
   Alert, Clock, ClockMode, Cme, Delta, FeedId, FeedStatus, Flare, HistoryRes, LiveState, ServerMessage,
   SunspotRegion, WindSeries, XraySeries,
 } from "@cme/shared";
-import { emptyWind, emptyXray, STATE_WINDOW_S } from "@cme/shared";
+import { emptyWind, emptyXray, FEED_DEFS, STATE_WINDOW_S } from "@cme/shared";
 import {
   classFromFlux, dbmForecast, DEFAULT_GAMMA, fluxFromClass, formatLocation, isEarthDirected, newell, parseLocation,
   SYNODIC_DEG_PER_DAY,
@@ -35,13 +35,7 @@ interface Outage { feed: FeedId; start: number; end: number }
 interface Pending { time: number; ev: ScenarioEvent }
 type Sequenced = Extract<ServerMessage, { seq: number }>;
 
-const FEEDS: { id: FeedId; label: string; cadenceS: number; staleAfterS: number }[] = [
-  { id: "goes_xray", label: "GOES X-ray flux", cadenceS: 60, staleAfterS: 300 },
-  { id: "goes_flares", label: "GOES flare list", cadenceS: 60, staleAfterS: 600 },
-  { id: "rtsw", label: "Solar wind at L1 (RTSW)", cadenceS: 60, staleAfterS: 300 },
-  { id: "regions", label: "Sunspot regions (SWPC)", cadenceS: 1800, staleAfterS: 3 * HOUR },
-  { id: "donki", label: "CMEs (NASA DONKI)", cadenceS: 300, staleAfterS: HOUR },
-];
+const FEEDS = FEED_DEFS;
 
 export interface EngineOptions { fixtures: Fixtures; now?: number; speed?: number }
 
