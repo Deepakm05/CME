@@ -1,7 +1,7 @@
 # GAP T1: the backend is done when this job passes.
 # Runs the API contract suite (packages/contract-tests) against the real Worker under `wrangler dev` (workerd),
 # fed by a local live imitation of the NOAA feeds (apps/worker/scripts/fixture-feeds.ts) instead of the internet.
-# The stream is real-time (a delta about once a minute), so the suite waits up to CONTRACT_WAIT_MS = 150 s.
+# The stream is real-time (a delta about once a minute), so the suite waits up to CONTRACT_WAIT_MS = 240 s: tests that need 3 deltas take about 3 min, plus a minute of headroom.
 # Test alerts are raised through POST /api/v1/admin/test-alert with the ADMIN_TOKEN passed below.
 name: Contract (Worker)
 
@@ -48,7 +48,7 @@ jobs:
           CONTRACT_BASE_URL: http://127.0.0.1:8787
           CONTRACT_CONTROL: worker
           CONTRACT_ADMIN_TOKEN: ci-token
-          CONTRACT_WAIT_MS: "150000"
+          CONTRACT_WAIT_MS: "240000"
       - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@v4
