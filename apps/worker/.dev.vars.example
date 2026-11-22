@@ -1,3 +1,5 @@
 # Local secrets for `wrangler dev`. Copy to .dev.vars (never commit the copy).
 ADMIN_TOKEN=dev-admin-token
 NASA_API_KEY=
+# Local dev only: the Vite dev server proxies with the browser's Origin (production allows only the Pages domain).
+ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173

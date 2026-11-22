@@ -1,4 +1,6 @@
 // Cloudflare config for the backend (docs/design/backend/DETAILED_DESIGN.md, TECH_STACK.md).
+// ALLOWED_ORIGINS: production lists the Pages domain (add a custom domain here when there is one); local
+// `wrangler dev` sends no Origin from node clients, localhost for the Vite dev proxy comes from .dev.vars (see .dev.vars.example).
 // Secrets (never in this file): NASA_API_KEY, ADMIN_TOKEN -> `wrangler secret put <NAME> [--env staging]`.
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
@@ -11,7 +13,7 @@
   "triggers": { "crons": ["* * * * *"] },
   "vars": {
     "ENVIRONMENT": "production",
-    "ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173",
+    "ALLOWED_ORIGINS": "https://cme-web.pages.dev",
     "FEED_BASE": "https://services.swpc.noaa.gov"
   },
   "env": {
