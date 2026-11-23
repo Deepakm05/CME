@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -109,7 +109,7 @@ jobs:
             echo "CLOUDFLARE_API_TOKEN is not set; skipping deploy." >> "$GITHUB_STEP_SUMMARY"
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.cf.outputs.enabled == 'true'
         with:
           node-version: 22
@@ -156,7 +156,7 @@ jobs:
             echo "CLOUDFLARE_API_TOKEN is not set (or this is a fork PR); skipping preview." >> "$GITHUB_STEP_SUMMARY"
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.cf.outputs.enabled == 'true'
         with:
           node-version: 22
