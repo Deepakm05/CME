@@ -59,10 +59,14 @@ export async function pollJson(url: string, etag: string | null, opts: PollOpts 
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
   const shown = redact(url);
+  // An explicit timer rather than AbortSignal.timeout(): that one's timer is unref'd in Node, so a test awaiting
+  // only it is abandoned as "event loop already resolved" (Node 22). The timeout also covers reading the body.
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(new DOMException("timed out", "TimeoutError")), timeoutMs);
   try {
     const headers: Record<string, string> = { accept: "application/json" };
     if (etag) headers["if-none-match"] = etag;
-    const res = await fetchFn(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+    const res = await fetchFn(url, { headers, signal: ctl.signal });
     if (res.status === 304) {
       await res.body?.cancel().catch(() => {});
       return { kind: "unchanged" };
@@ -84,6 +88,8 @@ export async function pollJson(url: string, etag: string | null, opts: PollOpts 
     const name = e instanceof Error ? e.name : "";
     if (name === "TimeoutError" || name === "AbortError") throw new FeedError(`timeout after ${timeoutMs}ms ${shown}`);
     throw new FeedError(`fetch failed ${shown}: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
