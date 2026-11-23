@@ -1,0 +1,12 @@
+// Cloudflare Pages config for the frontend. Deploy from this folder: `npx wrangler pages deploy`.
+// The API binding routes /api/v1/* to the Worker (functions/api/v1/[[path]].ts).
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "cme-web",
+  "pages_build_output_dir": "./dist",
+  "compatibility_date": "2026-11-01",
+  "services": [{ "binding": "API", "service": "cme-worker" }],
+  "env": {
+    "preview": { "services": [{ "binding": "API", "service": "cme-worker-staging" }] }
+  }
+}

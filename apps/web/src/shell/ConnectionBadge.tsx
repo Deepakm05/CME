@@ -8,6 +8,7 @@ const LABEL: Record<ConnStatus, string> = {
   live: "Live",
   reconnecting: "Reconnecting…",
   polling: "Delayed · polling",
+  rejected: "Live stream blocked · polling",
 };
 
 /** Is the stream up? Live = pushed updates; anything else means what you see may lag (UF9). */

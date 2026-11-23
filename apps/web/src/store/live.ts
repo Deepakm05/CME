@@ -6,13 +6,14 @@ import { ColumnSeries } from "../lib/series.ts";
 export const XRAY_KEYS = ["long", "short"] as const;
 export const WIND_KEYS = ["speed", "density", "temperature", "bx", "by", "bz", "bt", "newell"] as const;
 
-export type ConnStatus = "connecting" | "live" | "reconnecting" | "polling";
+/** "rejected": the server refused this page's Origin (close 1008). No socket is retried; /state is polled read-only. */
+export type ConnStatus = "connecting" | "live" | "reconnecting" | "polling" | "rejected";
 
 export interface Conn {
   status: ConnStatus;
   /** Where the data on screen last came from. */
   source: "none" | "cache" | "rest" | "ws";
-  /** Consecutive WebSocket attempts that ended without ever opening. */
+  /** Consecutive WebSocket attempts that ended without delivering a valid message (open-then-close counts). */
   failures: number;
   lastMessageAt: Unix | null; // wall clock, seconds
   gaps: number; // seq gaps detected since load

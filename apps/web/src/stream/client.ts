@@ -1,4 +1,4 @@
-import { API_PREFIX, checkLiveState, checkServerMessage, type Alert, type ClientMessage, type LiveState, type ServerMessage } from "@cme/shared";
+import { API_PREFIX, PROTOCOL_VERSION, checkLiveState, checkServerMessage, helloSchema, type Alert, type ClientMessage, type LiveState, type ServerMessage } from "@cme/shared";
 import type { Conn, LiveStore } from "../store/live.ts";
 import { recordArrival } from "../lib/arrival.ts";
 import { serverNow } from "../lib/api.ts";
@@ -30,7 +30,18 @@ export interface LiveStreamOptions {
   random?: () => number;
   /** Called for each new `alert` message, after it is in the store (toast / sound / notification). */
   onAlert?: (alert: Alert) => void;
+  /** GAP D3: reloads the page when the server's `hello.minClient` is above this build's protocol. Default: location.reload(). */
+  reload?: () => void;
+  /** Where the "already reloaded once for this minClient" flag lives (loop guard). Default: sessionStorage, else memory. */
+  storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">;
 }
+
+/** Close codes the real backend uses to refuse or end a socket it had already accepted (backend design section 7.1). */
+const CLOSE_ORIGIN_NOT_ALLOWED = 1008;
+const CLOSE_SERVICE_RESTART = 1012;
+const CLOSE_TOO_MANY_SOCKETS = 1013;
+const RESTART_SPREAD_MS = 3000; // GAP S2
+const RELOAD_FLAG = "cme.helloReload";
 
 type Timer = ReturnType<typeof setTimeout>;
 
@@ -41,16 +52,26 @@ type Timer = ReturnType<typeof setTimeout>;
  * - Every sequenced message must be seq + 1. A gap sends {"type":"resync"} and drops messages until the
  *   snapshot arrives; a duplicate (seq ≤ current) is ignored.
  * - On close: reconnect with backoff, resuming with ?since=<seq> so the server replays what was missed.
- * - After 3 failed attempts in a row: also poll GET /state every 30 s until the socket is back.
+ * - After 3 failed attempts in a row: also poll GET /state every 30 s until the socket is back. An attempt only
+ *   counts as successful once the server has delivered a valid snapshot, delta, alert or ping: the real backend
+ *   accepts a socket it is about to refuse, so "opened" alone proves nothing.
+ * - Close codes: 1008 (origin not allowed) = never reconnect, status "rejected", poll GET /state read-only;
+ *   1013 (too many sockets) = poll GET /state at once and retry the socket slowly; 1012 (service restart) =
+ *   reconnect after a random 0-3 s.
+ * - `hello` with minClient above PROTOCOL_VERSION: save the cache and reload once (GAP D3).
  *
  * No React in here, so it runs unchanged under node:test against the mock server.
  */
 export class LiveStream {
-  private readonly o: Required<Omit<LiveStreamOptions, "cache" | "onAlert">> &
-    Pick<LiveStreamOptions, "cache" | "onAlert">;
+  private readonly o: Required<Omit<LiveStreamOptions, "cache" | "onAlert" | "reload" | "storage">> &
+    Pick<LiveStreamOptions, "cache" | "onAlert" | "reload" | "storage">;
   private ws: WebSocket | null = null;
   private stopped = true;
   private opened = false; // the current socket connected
+  private confirmed = false; // the current socket has delivered a valid message (the only proof it is healthy)
+  private rejected = false; // closed with 1008: never reconnect
+  private reloading = false;
+  private memFlag: string | null = null; // RELOAD_FLAG when there is no sessionStorage
   private awaitingSnapshot = false;
   private dirty = false; // store changed since the last cache save
   private reconnectTimer: Timer | null = null;
@@ -80,6 +101,7 @@ export class LiveStream {
   async start(): Promise<void> {
     if (!this.stopped) return;
     this.stopped = false;
+    this.rejected = false;
     this.setConn({ status: "connecting" });
 
     const loaded = await this.o.cache?.load().catch(() => null);
@@ -107,7 +129,7 @@ export class LiveStream {
 
   /** Reconnect now (e.g. the browser's `online` event) instead of waiting out the backoff. */
   reconnectNow(): void {
-    if (this.stopped || this.ws?.readyState === 1 /* OPEN */) return;
+    if (this.stopped || this.rejected || this.ws?.readyState === 1 /* OPEN */) return;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.dropSocket();
@@ -133,6 +155,7 @@ export class LiveStream {
     const since = seq !== null && !this.awaitingSnapshot ? `?since=${seq}` : "";
     this.awaitingSnapshot = false;
     this.opened = false;
+    this.confirmed = false;
 
     let ws: WebSocket;
     try {
@@ -142,14 +165,18 @@ export class LiveStream {
       return;
     }
     this.ws = ws;
-    // Live as soon as the socket opens: a quiet server (real-time speed) may not send anything for a minute.
-    ws.onopen = () => this.ws === ws && this.markOpen();
+    // The badge goes live as soon as the socket opens (a quiet server may send nothing for a minute), but this
+    // does not reset the failure count or stop polling: only a delivered message does (see confirm()).
+    ws.onopen = () => {
+      if (this.ws !== ws) return;
+      this.opened = true;
+      if (!this.pollTimer) this.setConn({ status: "live" });
+    };
     ws.onmessage = (ev) => this.onMessage(ev.data);
     // Either event ends this socket, once. Browsers send close after error, Node's WebSocket may not;
-    // never call ws.close() from onerror (it can re-fire error).
-    const ended = () => this.ws === ws && this.onClose();
-    ws.onclose = ended;
-    ws.onerror = ended;
+    // never call ws.close() from onerror (it can re-fire error). Only close events carry a code.
+    ws.onclose = (ev) => this.ws === ws && this.onClose(ev?.code);
+    ws.onerror = () => this.ws === ws && this.onClose();
     this.armSilence();
   }
 
@@ -160,12 +187,15 @@ export class LiveStream {
     } catch {
       return;
     }
-    const checked = checkServerMessage(m);
 
     this.armSilence();
-    this.markOpen();
     this.setConn({ lastMessageAt: Date.now() / 1000 });
-    if (checked.ok) return this.handle(checked.value);
+    if ((m as { type?: unknown } | null)?.type === "hello") return this.onHello(m);
+    const checked = checkServerMessage(m);
+    if (checked.ok) {
+      this.confirm();
+      return this.handle(checked.value);
+    }
     // Unknown message types are skipped (the server may add new ones). Anything else that fails the contract
     // is never applied; if it carried a seq, what it held is now missing, so ask for a fresh snapshot.
     if (checked.error === "unknown") return;
@@ -173,11 +203,50 @@ export class LiveStream {
     if (typeof (m as { seq?: unknown }).seq === "number" && !this.resyncTimer) this.requestResync();
   }
 
-  private markOpen(): void {
-    if (this.opened) return;
-    this.opened = true;
+  /**
+   * The socket has delivered something valid, so the connection counts as good: reset the failure count and
+   * stop polling. A hello alone does not count (the server could still close right after it).
+   */
+  private confirm(): void {
+    if (this.confirmed) return;
+    this.confirmed = this.opened = true;
     this.stopPolling();
     this.setConn({ status: "live", failures: 0 });
+  }
+
+  /** GAP D3: an old tab saves its cache and reloads once when the server demands a newer protocol. */
+  private onHello(m: unknown): void {
+    const hello = helloSchema.safeParse(m);
+    if (!hello.success) {
+      this.setConn({ invalid: this.o.store.getState().conn.invalid + 1, lastInvalid: "hello" });
+      return;
+    }
+    const { minClient } = hello.data;
+    if (minClient <= PROTOCOL_VERSION) {
+      this.flag("remove"); // this build is accepted: a later bump may reload again
+      return;
+    }
+    // Reloaded already for this minClient and still too old (stale bundle): stay as we are rather than loop.
+    if (this.reloading || this.flag("get") === String(minClient)) return;
+    this.reloading = true;
+    this.flag("set", String(minClient));
+    void this.saveCache().finally(() => (this.o.reload ?? (() => location.reload()))());
+  }
+
+  private flag(op: "get"): string | null;
+  private flag(op: "set", v: string): void;
+  private flag(op: "remove"): void;
+  private flag(op: "get" | "set" | "remove", v?: string): string | null | void {
+    try {
+      const st = this.o.storage ?? globalThis.sessionStorage;
+      if (op === "get") return st.getItem(RELOAD_FLAG);
+      if (op === "set") return st.setItem(RELOAD_FLAG, v!);
+      return st.removeItem(RELOAD_FLAG);
+    } catch {
+      // no storage (private mode, node): keep the guard in memory, which at least covers this page load
+      if (op === "get") return this.memFlag;
+      this.memFlag = op === "set" ? v! : null;
+    }
   }
 
   private handle(m: ServerMessage): void {
@@ -238,7 +307,7 @@ export class LiveStream {
     }, this.o.resyncTimeoutMs);
   }
 
-  private onClose(): void {
+  private onClose(code?: number): void {
     this.ws = null;
     if (this.silenceTimer) clearTimeout(this.silenceTimer);
     if (this.resyncTimer) {
@@ -248,12 +317,29 @@ export class LiveStream {
     }
     if (this.stopped) return;
 
-    const failures = this.opened ? 1 : this.o.store.getState().conn.failures + 1;
+    if (code === CLOSE_ORIGIN_NOT_ALLOWED) {
+      // Retrying cannot help (the Origin will not change): stay closed, keep the page fed by polling /state.
+      this.rejected = true;
+      this.startPolling();
+      this.setConn({ status: "rejected" });
+      return;
+    }
+
+    // Only a socket that delivered something counts as having worked; one closed straight after opening is a failure.
+    let failures = this.confirmed ? 1 : this.o.store.getState().conn.failures + 1;
+    const full = code === CLOSE_TOO_MANY_SOCKETS;
+    if (full) failures = Math.max(failures, this.o.pollAfterFailures);
     this.setConn({ failures, status: this.pollTimer ? "polling" : "reconnecting" });
     if (failures >= this.o.pollAfterFailures) this.startPolling();
 
-    const exp = Math.min(this.o.backoffMaxMs, this.o.backoffBaseMs * 2 ** (failures - 1));
-    const delay = exp * (0.5 + this.o.random() * 0.5);
+    let delay: number;
+    if (code === CLOSE_SERVICE_RESTART) {
+      delay = this.o.random() * RESTART_SPREAD_MS; // GAP S2: spread the herd
+    } else {
+      // A full server is retried at the slowest backoff, so that polling carries the load meanwhile.
+      const exp = Math.min(this.o.backoffMaxMs, full ? this.o.backoffMaxMs : this.o.backoffBaseMs * 2 ** (failures - 1));
+      delay = exp * (0.5 + this.o.random() * 0.5);
+    }
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
@@ -313,7 +399,7 @@ export class LiveStream {
       }
       const s = checked.value;
       const cur = this.o.store.getState().seq;
-      if (this.opened && cur !== null && s.seq <= cur) return; // the socket is already ahead
+      if (this.confirmed && cur !== null && s.seq <= cur) return; // the socket is already ahead
       applySnapshot(this.o.store, s, "rest");
       this.dirty = true;
     } catch {

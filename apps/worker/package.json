@@ -1,0 +1,21 @@
+{
+  "name": "@cme/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The real backend: one Cloudflare Worker + the SpaceWeatherHub Durable Object (docs/design/backend/DETAILED_DESIGN.md)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:staging": "wrangler deploy --env staging",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@cme/physics": "*",
+    "@cme/shared": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "wrangler": "^4.166.0"
+  }
+}

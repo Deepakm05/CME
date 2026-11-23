@@ -10,8 +10,8 @@
  */
 import * as z from "zod/mini";
 import type {
-  Alert, Clock, Cme, CmeForecast, Delta, EventsResponse, FeedStatus, Flare, HealthResponse, HistoryResponse,
-  LiveState, ServerMessage, SunspotRegion, WindSeries, XraySeries,
+  Alert, Clock, Cme, CmeForecast, Delta, EventsResponse, FeedLag, FeedStatus, Flare, HealthResponse, HelloMessage,
+  HistoryResponse, LiveState, ServerMessage, SunspotRegion, WindSeries, XraySeries,
 } from "./index.ts";
 
 /** Upper bounds on list sizes: a cheap guard against a broken upstream flooding every browser. */
@@ -170,7 +170,27 @@ export const eventsResponseSchema = z.object({
   alerts: z.optional(z.array(alertSchema)),
 });
 
-export const healthResponseSchema = z.object({ clock: clockSchema, feeds: z.array(feedSchema) });
+const feedId = z.enum(["goes_xray", "goes_flares", "rtsw", "regions", "donki"]);
+
+export const feedLagSchema = z.object({ feed: feedId, p50: nullableNum, p95: nullableNum });
+
+export const healthResponseSchema = z.object({
+  clock: clockSchema,
+  feeds: z.array(feedSchema),
+  status: z.optional(z.enum(["ok", "degraded", "down"])),
+  seq: z.optional(seq),
+  sockets: z.optional(z.int().check(z.nonnegative())),
+  alarmLagS: z.optional(nullableNum),
+  lag: z.optional(z.array(feedLagSchema)),
+});
+
+export const helloSchema = z.object({
+  type: z.literal("hello"),
+  protocol: z.int(),
+  minClient: z.int(),
+  seq,
+  ts: unix,
+});
 
 /** Query parameters of GET /history (strings in, numbers out). */
 export const historyQuerySchema = z.object({
@@ -202,6 +222,8 @@ export type _SchemaMatchesContract = [
   Assert<Same<Out<typeof historyResponseSchema>, HistoryResponse>>,
   Assert<Same<Out<typeof eventsResponseSchema>, EventsResponse>>,
   Assert<Same<Out<typeof healthResponseSchema>, HealthResponse>>,
+  Assert<Same<Out<typeof feedLagSchema>, FeedLag>>,
+  Assert<Same<Out<typeof helloSchema>, HelloMessage>>,
 ];
 
 // ---- helpers ---------------------------------------------------------------

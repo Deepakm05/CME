@@ -1,6 +1,6 @@
 # Backend design: HLD + LLD
 
-`apps/worker` is one Cloudflare Worker plus one Durable Object. **Status:** not built yet. The mock (`apps/mock`) implements the same contract and is the reference behaviour. Gap ids such as [S1] point to [../GAP_ANALYSIS.md](../GAP_ANALYSIS.md).
+`apps/worker` is one Cloudflare Worker plus one Durable Object. **Status:** Phase 1 in progress. The feeds, state core, storage and tests are on `cme-backend-p0-p1`; the hub's `alarm()` loop and the `/health` and WebSocket wiring are still being finished. The mock (`apps/mock`) implements the same contract and is the reference behaviour. Gap ids such as [S1] point to [../GAP_ANALYSIS.md](../GAP_ANALYSIS.md).
 
 Diagrams are Excalidraw: sources in [diagrams/src/](diagrams/src/), generator in [../_tools/hld_lld.py](../_tools/hld_lld.py).
 
@@ -70,6 +70,7 @@ alarm():
 
 - GOES flux must be > 0, and fill values (−99999) are dropped.
 - RTSW rows with `active=false` are dropped, and only one row is kept per timestamp (the active spacecraft).
+- RTSW join rule: wind and mag arrive as separate files. A `wind_sample` row is emitted only up to the newest minute that both wind and mag have, so a half-joined minute is never stored. The rest waits for the next poll.
 - Region locations must parse (`parseLocation`); odd ones are kept without lat/lon.
 - DONKI needs `speed`, `latitude`, `longitude` and `halfAngle` as numbers; otherwise the CME is skipped and logged.
 

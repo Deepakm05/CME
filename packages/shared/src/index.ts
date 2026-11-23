@@ -155,7 +155,40 @@ export type ServerMessage =
 
 export type ClientMessage = { type: "pong"; ts: Unix } | { type: "resync" };
 
+/** WebSocket protocol version (GAP_ANALYSIS D3). Only additive changes are allowed within a version. */
+export const PROTOCOL_VERSION = 1;
+
+/**
+ * First message on every socket from the real backend. Not part of ServerMessage on purpose: clients that
+ * don't know it ignore it as an unknown type, so adding it is backward compatible.
+ */
+export interface HelloMessage {
+  type: "hello";
+  protocol: number;
+  minClient: number; // a client whose protocol is lower must save its cache and reload
+  seq: number; // the server's current seq
+  ts: Unix;
+}
+
 export const API_PREFIX = "/api/v1";
+
+// ---- feeds -----------------------------------------------------------------
+
+export interface FeedDef {
+  id: FeedId;
+  label: string;
+  cadenceS: number; // normal poll interval
+  staleAfterS: number; // data older than this is stale
+}
+
+/** The upstream feeds, shared by the mock and the Worker so their FeedStatus can't drift. */
+export const FEED_DEFS: readonly FeedDef[] = [
+  { id: "goes_xray", label: "GOES X-ray flux", cadenceS: 60, staleAfterS: 300 },
+  { id: "goes_flares", label: "GOES flare list", cadenceS: 60, staleAfterS: 600 },
+  { id: "rtsw", label: "Solar wind at L1 (RTSW)", cadenceS: 60, staleAfterS: 300 },
+  { id: "regions", label: "Sunspot regions (SWPC)", cadenceS: 1800, staleAfterS: 3 * 3600 },
+  { id: "donki", label: "CMEs (NASA DONKI)", cadenceS: 300, staleAfterS: 3600 },
+];
 
 // ---- REST responses --------------------------------------------------------
 
@@ -176,9 +209,24 @@ export interface EventsResponse {
   alerts?: Alert[];
 }
 
+export type HealthStatus = "ok" | "degraded" | "down";
+
+/** Freshness of one feed over the last hour (GAP_ANALYSIS O1). Seconds; null until there are samples. */
+export interface FeedLag {
+  feed: FeedId;
+  p50: number | null;
+  p95: number | null;
+}
+
+/** The optional fields are filled by the real backend (backend design §9); the mock may leave them out. */
 export interface HealthResponse {
   clock: Clock;
   feeds: FeedStatus[];
+  status?: HealthStatus;
+  seq?: number;
+  sockets?: number;
+  alarmLagS?: number | null;
+  lag?: FeedLag[];
 }
 
 // ---- helpers ---------------------------------------------------------------
